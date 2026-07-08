@@ -1,0 +1,442 @@
+Functional Specification
+Project position
+Updated v1.2 to include the MintSystemNew email reporting pattern as a DBMTS Reporting & Notification Framework. The specification now covers scheduled reports, real-time operational alerts, recipient configuration, send logging, admin controls, AJAX endpoints, report keys, and deployment constraints. Visual QA standards remain out of scope.
+
+Item	Detail
+Prepared for	Wet Mustard Digitalisation Project
+Prepared by	Adrian Lacki
+Document purpose	Specification for implementation.
+Version	Draft v1.2
+Date	7 July 2026
+Key decisions	MO-driven traceability; visual QA excluded; recipe batch variants required; reporting/notification framework included
+
+ 1. Executive Summary
+The Digital Batch Manufacturing & Traceability System (DBMTS) is an MO-driven production and traceability platform for the Wet Mustard operation. It replaces paper batchcards, pallecon filling records, bucket packing records, drum processing records, metal detector verification sheets and primary packaging traceability records.
+Scope clarification
+Quality Attribute Standard visual/image comparison remains excluded from MVP. QA standards may be retained as reference documents only.
+
+2. Business Objectives
+•	Replace paper production and traceability records with controlled electronic records.
+•	Reduce repeated entry of MO, product, batch number, BBE, operator and traceability data.
+•	Support genealogy from finished pallet, drum or bucket back to pallecon, manufacturing batch, ingredient lots and packaging lots.
+•	Improve HACCP / CCP / OPRP / QCP record completion, review and auditability.
+•	Add reporting and notification capability so incomplete records, overdue checks and exceptions are visible without manually searching the system.
+•	Support controlled corrections through electronic signatures and audit trail.
+3. Source Documents
+Ref	Document	Use in DBMTS
+WM018	30010004 Kerry Dusseldorf Mustard Batchcard	Manufacturing batchcard
+WM019	30010002 Condi American Mustard CPM001A Batchcard	Manufacturing batchcard
+WM020	30010001 Condi Wholegrain Mustard CPM001WG Batchcard	Manufacturing batchcard
+WM021	30010009 Condi English Mustard CPM001E Batchcard	Manufacturing batchcard
+WM022	30010010 Condi Dijon Mustard CPM001 Batchcard	Manufacturing batchcard
+WM023	30010003 Condi Dijon Style Mustard CPM001DS Batchcard	Manufacturing batchcard
+WM025	30010018 Dijon Mustard CPM002 Batchcard	Manufacturing batchcard
+WM034	30010016 BPS Poshdog Mustard Batchcard	Manufacturing batchcard
+WM036	30010019 Condi French Mustard Batchcard	Manufacturing batchcard
+WM039	30010023 American Style Mustard CSS CPM004A Batchcard	Manufacturing batchcard
+WM042	30010025 BPS M&S English Mustard Batchcard	Manufacturing batchcard
+WM044	30010022 American Style Mustard NAS CPM003A Batchcard	Manufacturing batchcard
+WM045	30010023 American Style Mustard CSS CPM004A Batchcard 500kg	Batch-size variant for recipe 30010023
+WM048	30010026 Table Mustard CPM001M Batchcard 800kg	Batch-size variant for recipe 30010026
+WM049	30010026 Table Mustard CPM001M Batchcard 400kg	Half-batch variant for recipe 30010026
+
+Ref	Document	Use in DBMTS
+WM004	Wet Mustard Pallecon filling / processing	Bulk fill traceability, pallecon serials, seals, liner checks and fill weights
+WM011	Metal Detector Verification Sheet	CCP checks at start of shift, hourly and end of shift
+WM014	Primary Packaging Records - Drums	Primary packaging traceability for fibre drums
+WM015	Primary Packaging Records - Buckets & Lids	Bucket and lid supplier lot traceability
+WM016	Wet Mustard Bucket Processing 10kg	Packing run, IBC consumption, hourly checks, weights and pallet records
+WM024	Wet Mustard Product Codes	Product master, recipe codes, FG codes, intermediate codes, shelf life, pallet setup and customers
+WM046	Wet Mustard Drum Processing	Drum processing route: pallet, pallecon, drums, bag seals, drum seals, fill weights and label checks
+WM047	Primary Packaging Records - Buckets & Lids	Jokey packaging traceability using NVE number, time on and operator
+
+Reference	Description	Project treatment
+MintSystemNew Email Reporting Specification	Existing PHP/SQL Server/Windows Task Scheduler reporting pattern	Adopt conceptually for DBMTS reporting and notification framework
+QA standards WM028-WM033, WM035, WM037, WM040, WM041	Quality standards	Reference only; visual comparison excluded from MVP
+
+4. Scope
+4.1 Included in MVP
+•	MO-driven production record creation.
+•	Generic electronic batchcard engine for all recipes and batch-size variants.
+•	Ingredient lot capture including quantity, weighed-by, weighed timestamp, tipped-by and tipped timestamp.
+•	Recipe batch variant support for products with multiple approved batch sizes.
+•	Process step completion with mandatory sign-offs and recipe-specific parameter capture.
+•	Metal detector verification records.
+•	Pallecon filling records.
+•	Bucket packing records and pallet records.
+•	Drum processing records.
+•	Primary packaging traceability for drums, buckets and lids across supplier formats.
+•	Scheduled operational reports and on-demand traceability exports.
+•	Real-time notification rules for selected operational exceptions.
+•	WinMan existing-MO integration: consume released/outstanding WinMan manufacturing orders, load live Work In Progress components, and book completed finished goods back to the selected MO using approved stored procedures only.
+4.2 Excluded from MVP
+•	Visual QA image comparison or automated product appearance scoring.
+•	Mandatory camera/photo capture workflow.
+•	PLC or machine integration.
+•	Automatic weighing scale integration.
+•	Customer portal.
+•	Full warehouse stock movement system.
+•	BarTender integration unless added as a later phase.
+•	Creating new WinMan manufacturing orders from DBMTS. MVP must consume existing WinMan MOs only; MO creation remains a future phase if required.
+5. High-Level Workflow
+Planning / WinMan MO
+        ↓
+MO selected in DBMTS
+        ↓
+Product, recipe and batch-size variant loaded
+        ↓
+Manufacturing batch record created
+        ↓
+Ingredients weighed, lot numbers captured and signed
+        ↓
+Ingredients tipped and signed
+        ↓
+Mixing / milling / process steps completed
+        ↓
+Metal detector verification
+        ↓
+Bulk holding / pallecon filling
+        ↓
+Route A: Bucket packing and pallet records
+        OR
+Route B: Drum processing and pallet records
+        ↓
+Packaging lots linked
+        ↓
+QA review / record closure
+        ↓
+Scheduled reports, traceability exports and exception notifications
+WinMan remains the system of record for manufacturing order creation. DBMTS must not create MOs in MVP; it consumes existing WinMan MOs, stores the selected WinMan identifiers locally, records the batch manufacturing events, and only writes back to WinMan during controlled finished-goods booking.
+
+6. Core Design Principles
+•	MO-first operation: operators begin by selecting or scanning the MO.
+•	Recipe and batch size are separate: a recipe can have multiple approved batch-size variants.
+•	No repeated master data entry: product, recipe, expected quantity, shelf life and packaging route are inherited from master data.
+•	Digital records represent process events, not scanned copies of paper forms.
+•	Every critical action is timestamped and linked to a named user.
+•	Corrections create audit entries rather than overwriting history.
+•	Screens must be tablet-friendly and production-floor appropriate.
+•	Reporting and alerting must be configurable rather than hardcoded wherever practical.
+7. Master Data Requirements
+Master Data Area	Purpose
+Product Master	Recipe code, product name, FG code, intermediate code, shelf life, pack format, pallet setup and customers.
+Recipe Master	Recipe header, document revision, process steps and ingredient definition.
+Recipe Batch Variant Master	Approved batch sizes and PLC recipe numbers for the same recipe.
+Document Reference Master	WM document code, title, version, issue date, module and status.
+Packaging Supplier Master	Supplier names, reference type such as lot/job or NVE number, and packaging type.
+Report Configuration Master	Configurable scheduled reports, schedule time, date offsets and enabled status.
+Recipient / Role Mapping	Global, report-specific and role-derived recipients for scheduled reports and alerts.
+Product Master must include the WinMan finished goods mapping required for MO selection and booking. DBMTS should map RecipeCode and FinishedGoodsCode to the WinMan ProductId string, then use WinMan Products.Product to retain the internal product key where required. The WinMan ProductId must be treated as a string, not an integer.
+
+8. Functional Modules
+Module	Purpose
+Generic Manufacturing Batch Record	Replaces all batchcards including WM018-WM049 listed in scope.
+Metal Detector Verification	Replaces WM011 and supports CCP check completion and failure handling.
+Pallecon Filling	Replaces WM004 and links bulk product to pallecon/IBC traceability.
+Bucket Packing	Replaces WM016 and captures bucket checks, weights, IBC consumption and pallets.
+Drum Processing	Replaces WM046 and captures drum numbers, fill weights, bag seals, drum seals and pallet ticket numbers.
+Packaging Traceability	Replaces WM014, WM015 and WM047 using flexible supplier reference fields.
+Traceability Search	Backward and forward trace across batches, pallecons, packing/drum runs, ingredients and packaging lots.
+Reporting & Notifications	Scheduled daily/weekly reports, on-demand exports, recipient configuration, send log and real-time alerts.
+
+9. Data Model
+ProductMaster(ProductId, RecipeCode, ProductName, FinishedGoodsCode, IntermediateCode, WinManProductId, WinManProductInternal, WinManPackSize, ShelfLife, PackFormat, PalletType, AmountPerPallet, Customer, ActiveFlag)
+RecipeHeader(RecipeId, RecipeCode, Revision, IssueDate, PLCRecipeNumber, SourceDocumentCode)
+RecipeBatchVariant(VariantId, RecipeCode, VariantName, BatchSize, PLCRecipeNumber, SourceDocumentCode, ActiveFlag)
+RecipeIngredient(RecipeIngredientId, RecipeId, VariantId, MaterialCode, MaterialDescription, Percentage, RequiredQuantity, UOM, Sequence)
+ManufacturingOrder(MOId, MONumber, WinManManufacturingOrder, WinManManufacturingOrderId, WinManProductInternal, WinManProductId, RecipeCode, VariantId, ProductId, PlannedQuantity, QuantityOutstanding, WinManSystemType, WinManLastModifiedDate, Status, CreatedDate)
+WinManMOComponentSnapshot(ComponentSnapshotId, MOId, WinManManufacturingOrder, WinManComponentProduct, WinManComponentProductId, ComponentDescription, Classification, QuantityIssued, QuantityOutstanding, SnapshotAt)
+BatchRecord(BatchId, MOId, BatchNumber, ProductionDate, Shift, Status, CreatedBy, CreatedAt)
+BatchIngredientLot(BatchIngredientLotId, BatchId, RecipeIngredientId, LotNumber, ActualQuantity, WeighedBy, WeighedAt, TippedBy, TippedAt, Notes)
+BatchProcessStep(StepId, BatchId, StepName, Sequence, RequiredFlag, CompletedBy, CompletedAt, Comments)
+BatchProcessParameter(ParameterId, BatchId, ParameterName, Value, UOM, EnteredBy, EnteredAt)
+MetalDetectorCheck(CheckId, MOId, BatchId, ProductId, CheckType, CheckTime, Fe10Result, NonFe15Result, Ss20Result, BinLocked, BinEmpty, Comments, SignedBy, SignedAt)
+PalleconRecord(PalleconId, BatchId, MONumber, TicketNumber, SerialNumber, TopSealNumber, BottomSealNumber, LinerNumber, LinerBatchCode, FillWeight, StartTime, FinishTime, CheckedBy)
+PackingRun(PackingRunId, MONumber, ProductId, PackingDate, Shift, Status)
+PackingRunIBC(PackingRunIBCId, PackingRunId, PalleconId, SourceBatchNumber, SourceMONumber, TimeOn, TimeOff)
+PackingHourlyCheck(CheckId, PackingRunId, CheckTime, BucketClean, LidClean, LidsSecure, TamperInPlace, LabelCorrect, PrintClear, LotCodeCorrect, FillerClean, FillClean, SignedBy, SignedAt)
+PackingWeightCheck(WeightCheckId, PackingRunId, CheckTime, Weight1, Weight2, Weight3, Weight4, Weight5, Weight6, AverageWeight, Result)
+DrumProcessingRun(DrumRunId, MONumber, BatchId, ProductId, Shift, Operator, BbeMatchesWinMan, Status)
+DrumProcessingPallet(DrumPalletId, DrumRunId, PalleconNumber, PalletTicketNumber, StartTime, StartDate, FinishTime, FinishDate, CheckedBy)
+DrumRecord(DrumRecordId, DrumPalletId, DrumNumber, DrumTime, FillerWeight, BagSealNumber, DrumSealNumber, LinerCleanUndamaged)
+PalletRecord(PalletId, PackingRunId, DrumRunId, PalletNumber, Time, TicketNumber, PalletAmount, BbePalletLabel)
+PackagingLot(PackagingLotId, PackagingType, Supplier, SupplierReferenceType, SupplierReferenceNumber, SupplierProductionDate, MachineNumber, LotOrJobNumber, TimeOn, OperatorName, LinkedMO, LinkedPackingRunId, LinkedDrumRunId)
+WinManBookingLog(BookingLogId, BatchId, WinManInventoryId, WinManManufacturingOrder, WinManManufacturingOrderId, WinManProductInternal, WinManProductId, BatchNumber, QuantityBookedKg, QuantityBookedTradedUnits, BookingUser, BookingDate, BookingStatus, ErrorMessage)
+AuditTrail(AuditId, EntityName, EntityId, FieldName, OldValue, NewValue, Action, Reason, UserId, Timestamp)
+ElectronicSignature(SignatureId, EntityName, EntityId, SignaturePurpose, UserId, SignedAt, Meaning, Comment)
+
+10. Reporting & Notification Data Model
+ReportConfig(ReportKey, ReportName, ReportType, ScheduleTime, DateOffsetFromDays, DateOffsetToDays, Enabled, UpdatedBy, UpdatedAt)
+ReportRecipient(RecipientId, ReportKey, RecipientEmail, RecipientName, RecipientType, RoleKey, Enabled, CreatedAt, UpdatedAt)
+ReportSendLog(SendId, ReportKey, TriggerMode, DateFrom, DateTo, RecipientsTo, RecipientsCc, Status, ErrorMessage, TriggeredBy, StartedAt, CompletedAt)
+NotificationRule(RuleId, RuleKey, RuleName, EventType, TriggerCondition, Severity, Enabled, CooldownMinutes, CreatedAt, UpdatedAt)
+NotificationRecipient(RuleRecipientId, RuleKey, RecipientEmail, RecipientName, RecipientType, RoleKey, Enabled)
+NotificationEvent(EventId, RuleKey, EntityName, EntityId, Severity, Message, Status, TriggeredAt, AcknowledgedBy, AcknowledgedAt, ResolvedAt)
+ReportFileRegistry(ReportKey, ReportFilePath, OutputFormat, ManualAllowed, ScheduledAllowed, PerDayAllowed, ActiveFlag)
+11. WinMan ERP Integration Requirements
+DBMTS MVP shall integrate with WinMan by consuming existing manufacturing orders only. WinMan remains responsible for MO creation and release. DBMTS must read eligible MOs and live component/BOM data from WinMan, store a local snapshot for traceability, and write back only when booking completed finished goods against the selected existing MO.
+11.1 SQL Connection and Environment Selection
+•	DBMTS shall connect to the WinMan SQL Server instance using the Microsoft SQL Server driver appropriate to the chosen backend framework.
+•	The WinMan SQL Server host is tcp:condi-sql1.
+•	The integration must support environment switching between Condimentum for production and PreRelease for debug/pre-release testing.
+•	The selected WinMan database name must be resolved through configuration, not hardcoded in query logic.
+•	Connection pooling and a sensible login timeout should be enabled where supported.
+11.2 Existing Manufacturing Order Selection
+DBMTS shall fetch outstanding WinMan manufacturing orders from ManufacturingOrders joined to Products. Eligible MOs should be filtered to firm or in-progress system types, positive outstanding quantity, and product codes that exist in the DBMTS ProductMaster mapping. Operators must select from these existing MOs; DBMTS must not create a new WinMan MO in MVP.
+WinMan field	DBMTS treatment
+ManufacturingOrders.ManufacturingOrder	Store as WinManManufacturingOrder. This internal BIGINT is used for stored procedure calls.
+ManufacturingOrders.ManufacturingOrderId	Store as WinManManufacturingOrderId / display MONumber. This is the human-readable MO reference.
+Products.Product	Store as WinManProductInternal for joins and stored procedure context.
+Products.ProductId	Store as WinManProductId. Treat as string and map from ProductMaster FinishedGoodsCode.
+11.3 Live BOM / Work In Progress Components
+For the selected MO, DBMTS shall fetch the live component list from WinMan WorkInProgress joined to Products using the internal ManufacturingOrder BIGINT. The result represents the live BOM explosion at the time of query and includes component product, component ProductId, description, classification, QuantityIssued and QuantityOutstanding.
+DBMTS should store a component snapshot when a batch record is created or refreshed so the electronic record shows which WinMan components were expected at the point of production. Mustard-specific classification and issue rules must be reviewed during implementation; Mint-specific classification assumptions must not be copied blindly.
+11.4 Product Mapping and PackSize
+The hardcoded Mint product map must be replaced by DBMTS ProductMaster mapping. The mapping path is RecipeCode to FinishedGoodsCode to WinMan ProductId. DBMTS must query Products.PackSize for quantity conversion where booking quantities need to be sent to WinMan in traded units.
+11.5 Finished Goods Booking to Existing MO
+When a DBMTS batch is ready for WinMan booking, DBMTS shall call the approved WinMan finishing stored procedure for the selected existing MO. Direct INSERT or UPDATE statements against WinMan tables are prohibited. The existing-MO booking flow must use the full finishing procedure pattern, including the internal ManufacturingOrder BIGINT, quantity to complete, finished date, expiry date, internal Location key, lot/batch number, output completed Inventory ID and LastModifiedDate concurrency value.
+The integration must read ManufacturingOrders.LastModifiedDate and QuantityOutstanding immediately before booking. If the MO no longer exists, is completed, has insufficient outstanding quantity, or has changed concurrently, the booking must be rejected and logged. Stored procedure result sets must be fully drained before output parameters are read.
+11.6 Duplicate Prevention and Integration Logging
+•	DBMTS shall maintain a local WinManBookingLog table for every attempted and successful booking.
+•	Before booking, DBMTS must check its local booking log to prevent the same BatchRecord being booked twice.
+•	Before booking, DBMTS must check WinMan Inventory for an existing LotNumber or batch number match.
+•	On successful booking, DBMTS must store the returned WinMan Inventory ID, internal MO number, human-readable MO reference, product identifiers, booked quantity, booking user and timestamp.
+•	Failed booking attempts should retain the error message for audit and support investigation.
+11.7 Explicit MVP Exclusion
+DBMTS MVP shall not call the WinMan manufacturing order creation procedure and shall not generate new WinMan MOs. The procedures and logic for creating, issuing and completing a new MO are reference-only for future scope. MVP is limited to existing-MO selection, component/BOM read, local batch record capture and controlled finished-goods booking against the selected existing MO.
+
+11. Validation Rules
+Area	Rule
+MO selection	A batch cannot be created without a valid MO.
+The MO must exist in WinMan, have a valid internal ManufacturingOrder BIGINT, and have QuantityOutstanding greater than zero.
+DBMTS must not create a new WinMan MO in MVP. If no suitable MO exists, the user must return to the normal WinMan planning process.
+Before WinMan booking, DBMTS must check local WinManBookingLog, WinMan Inventory duplicate lot/batch numbers, MO outstanding quantity and LastModifiedDate concurrency.
+
+Batch variant	If a recipe has multiple batch sizes, the correct variant must be selected before quantities display.
+Ingredient lot	Lot number and actual quantity are mandatory for every ingredient used.
+Lot change	A lot change creates a new lot row rather than overwriting existing data.
+Weighed/tipped sign-off	Required signatures cannot be blank.
+Process parameters	Required process parameters must be captured before batch completion.
+Metal detector	FE, non-FE and SS checks are mandatory.
+Drum processing	Drum records must capture drum number, fill weight, bag seal, drum seal and pallet ticket number where applicable.
+Packaging supplier format	Support both traditional lot/job fields and NVE number fields.
+Reports	Report keys must be whitelisted or registered before manual or scheduled execution.
+Send log	Every scheduled, manual or alert-driven email send must create a send-log entry.
+Audit trail	Corrections require old value, new value, user, timestamp and reason.
+Deletion	Completed records must not be physically deleted through the UI.
+
+12. Roles and Permissions
+Role	Permissions
+Operator	Create and complete production records, enter ingredients, complete checks and sign own actions.
+Production Supervisor	Review open records, correct exceptions, authorise controlled overrides and receive production exception reports.
+QA / Technical	Review HACCP/CCP/OPRP/QCP records, approve release, run traceability reports and receive QA exception alerts.
+Planning	Create/import or review MOs and planning data until integration is automated.
+Administrator	Maintain users, roles, master data, report configuration, notification rules and recipients.
+Read-only Auditor	View records, reports and send logs without editing data.
+
+13. Traceability Engine
+13.1 Backward Trace
+Finished pallet / drum / ticket number
+        ↓
+Packing run or drum processing run
+        ↓
+Pallecon / IBC / bulk source
+        ↓
+Manufacturing batch
+        ↓
+Ingredient lots
+        ↓
+Packaging lots
+
+13.2 Forward Trace
+Ingredient lot or packaging lot
+        ↓
+Batches / runs using lot
+        ↓
+Pallecons / IBCs
+        ↓
+Bucket pallets and/or drum pallets
+        ↓
+Finished goods / customers where available
+
+14. Reporting & Notification Framework
+DBMTS should adopt the existing MintSystemNew pattern of configurable reports, recipients, date offsets and manual Send Now, while extending it for DBMTS roles, send logging and event-driven alerts. This should be implemented as a first-class module rather than an afterthought.
+14.1 Scheduled Operational Reports
+Report key	Report name	Trigger	Audience / Role
+dbmts_daily_production_summary	Daily Production Summary	Daily	Production Supervisor, QA
+dbmts_open_batches	Open / Incomplete Batch Records	Daily	Production Supervisor, QA
+dbmts_overdue_metal_detect	Overdue Metal Detector Checks	Daily and/or alert	QA, Production Supervisor
+dbmts_weight_exceptions	Packing Weight Exceptions	Daily	QA, Production Supervisor
+dbmts_drum_summary	Drum Processing Daily Summary	Daily	Production Supervisor, QA
+dbmts_qa_approval_queue	Records Awaiting QA Approval	Daily	QA / Technical
+dbmts_traceability_exceptions	Traceability Exceptions	Daily	QA, Administrator
+
+14.2 On-Demand Reports / Exports
+Report	Description
+Backward Trace	Finished pallet/drum/ticket to packing or drum run, pallecon, batch, ingredient lots and packaging lots.
+Forward Trace	Ingredient or packaging lot to impacted batches, pallecons, finished pallets/drums and customers where available.
+Batch Record Export	Full audit-ready export of a single batch record.
+Audit Trail Report	Filtered audit events by date, user, entity or record.
+Active Products, Recipes and Variants	Master data listing for Planning/Admin review.
+Batch Record Summary by Date Range	Batch activity report by selected date range.
+
+14.3 Real-Time Alert Rules
+Alert rule	Trigger condition / intent
+ccp_failure	CCP-related failure is recorded, such as failed metal detector verification after recheck.
+missed_metal_detector_check	A required metal detector check becomes overdue.
+batch_open_too_long	A batch remains open beyond a configured duration.
+qa_approval_overdue	A completed record is awaiting QA approval beyond a configured duration.
+missing_signoff	A record is near closure but required sign-off is missing.
+packing_weight_breach	Packing weight check fails configured threshold rules.
+traceability_gap	Mandatory lot, seal, pallecon, drum, pallet or packaging reference is missing.
+
+14.4 Recipient Configuration
+•	Support global recipients that receive all scheduled DBMTS reports.
+•	Support per-report recipients for report-specific distribution.
+•	Support role-based recipients, resolving Production Supervisor, QA, Administrator or Planning users dynamically from the DBMTS role model.
+•	Support direct recipients for on-demand exports, such as sending a traceability export to self.
+•	Customer-specific recipients are future-scope and should use a separate table if required.
+14.5 Scheduling Architecture
+•	Initial implementation may use the existing Windows Task Scheduler/PHP CLI pattern if DBMTS is hosted alongside MintSystemNew.
+•	Report schedule settings should be stored in SQL but actual execution is controlled by either Task Scheduler, a service worker or a framework scheduler depending on chosen architecture.
+•	Where DB time and server schedule can diverge, the admin panel should show the configured DB time and the last successful send time.
+•	Manual Send Now must be available from the admin panel for authorised users.
+•	Per-day send mode should be supported for backfilling missed reports over a date range.
+14.6 Admin Panel Capabilities
+•	View, enable and disable reports.
+•	Change schedule times and date offsets.
+•	Manage global, per-report and role-based recipients.
+•	Trigger Send Now for a selected date range.
+•	Send per day over a selected range.
+•	View report send history and failure details.
+•	Manage notification rules, severity, recipients and enabled status.
+14.7 Email / Report Script Pattern
+Each report should:
+- Accept date_from, date_to and manual parameters.
+- Query DBMTS tables using the selected database/environment.
+- Produce self-contained HTML suitable for email clients.
+- Resolve recipients from global, per-report and role-based sources.
+- Create a ReportSendLog row with status and any error message.
+- Support scheduled mode and manual Send Now mode where enabled.
+- Avoid terminating the process before the send log is written.
+
+15. Screens / User Interface
+Screen	Purpose
+Dashboard	Open MOs, active batches, overdue checks, QA review queue, exception count and recent alert status.
+MO Search	Search and select existing outstanding WinMan MOs by MO reference, product, recipe mapping, required date or outstanding quantity. No DBMTS MO creation in MVP.
+Batch Record	Stepper tabs: header, ingredients, process steps, parameters, sign-offs and review.
+Ingredient Entry	Large inputs for scanner-friendly lot and quantity entry.
+Metal Detector	Pass/fail hourly check with failure workflow.
+Pallecon Fill	Card/grid view for multiple pallecons linked to one batch.
+Packing Run	IBC consumption, hourly checks, weight checks and pallet records.
+Drum Processing	Pallecon-to-drum records with pallets, drums, weights and seals.
+Packaging Lots	Bucket, lid and drum supplier lot/NVE records.
+Traceability Search	Search by MO, batch, lot, pallecon serial, drum, ticket or pallet.
+Reporting Admin	Report schedule, date offsets, recipients, Send Now and send log.
+WinMan Integration Admin	Environment status, ProductMaster mapping to WinMan ProductId, PackSize checks, MO fetch diagnostics, component snapshot review and booking log/failure investigation.
+Notification Admin	Alert rules, severity, recipients, enabled status and alert log.
+Admin Master Data	Products, recipes, variants, documents, users and validation thresholds.
+
+16. Reporting Requirements
+•	Batch record export for audit review.
+•	Traceability report from finished pallet/drum to ingredient and packaging lots.
+•	Traceability report from ingredient/packaging lot to impacted outputs.
+•	Open/incomplete batch records.
+•	Overdue metal detector check report.
+•	Packing weight exception report.
+•	Drum processing summary report.
+•	Records awaiting QA approval.
+•	Traceability exception report.
+•	Audit trail report by record, date range or user.
+•	Report send log and failure report.
+•	Master data report for active products, recipes and batch-size variants.
+17. Suggested Technical Architecture
+Layer	Recommendation
+Frontend	Responsive web UI suitable for tablets and production terminals.
+Backend	ASP.NET Core or Laravel/PHP depending on internal maintainability preference.
+Database	SQL Server for relational traceability, audit, reporting and send log.
+Authentication	Microsoft Entra ID / organisational identity where available.
+Scheduling	Task Scheduler/PHP CLI pattern can be reused initially; a framework scheduler or service worker can replace it later.
+Email	Reusable email sender/helper with HTML template support and send logging.
+Reporting	Built-in HTML/email reports first; Power BI/SQL reporting views later if needed.
+Exports	Generate audit-ready batch record and traceability exports.
+Phase 2 integrations	WinMan existing-MO integration is included in MVP for MO selection, live BOM/component read, PackSize lookup and controlled finished-goods booking. Later phases may add barcode scanning, label/BarTender integration and optional dashboards.
+
+
+18. Implementation Phases
+Phase	Description
+Phase 1 - Core batch records	Existing WinMan MO selection, ProductMaster to WinMan ProductId mapping, live WorkInProgress component fetch, electronic batchcard, ingredients, weighed/tipped sign-offs and process parameters.
+Phase 2 - CCP and bulk traceability	Metal detector checks, pallecon filling, seals, liners, weights, QA review and overdue check alerts.
+Phase 3 - Packing, drum processing and packaging	Bucket packing, drum processing, hourly checks, weight checks, pallet creation and packaging traceability.
+Phase 4 - Traceability and reporting	Backward/forward trace, audit reports, scheduled reports, report recipients, Send Now and send log.
+Phase 5 - Notifications and automation	Event-driven alerts, WinMan finished-goods booking to existing MOs, barcode scanning, labels, dashboards and optional Power BI reporting. Creation of new WinMan MOs remains excluded unless approved as a later project phase.
+
+19. Acceptance Criteria
+1.	A user can create a manufacturing batch from an MO without manually retyping product master data.
+2.	A user can select an existing outstanding WinMan MO and DBMTS stores both the internal WinMan ManufacturingOrder BIGINT and the human-readable ManufacturingOrderId reference.
+3.	DBMTS can fetch and display the selected MO's live WorkInProgress components from WinMan and store a component snapshot against the batch record.
+4.	DBMTS prevents WinMan booking where the batch has already been booked locally, the WinMan lot/batch number already exists, the MO has no outstanding quantity, or LastModifiedDate concurrency fails.
+5.	DBMTS does not create new WinMan manufacturing orders in MVP.
+6.	The system supports multiple batch-size variants for the same recipe.
+7.	A user can complete all ingredient lot entries and sign off weighed/tipped actions.
+8.	The system prevents batch completion where mandatory lots, quantities, parameters or signatures are missing.
+9.	Metal detector checks capture FE, non-FE and SS results plus escalation notes where required.
+10.	A batch can be linked to one or more pallecons with serials, seals and fill weights.
+11.	A packing run can consume pallecons/IBCs and create pallet records.
+12.	A drum processing run can capture pallecon number, pallet ticket number, drum number, fill weight, bag seal and drum seal.
+13.	Bucket, lid and drum packaging lots can be linked to product runs, including NVE-number supplier formats.
+14.	Backward trace returns packing/drum run, pallecon, manufacturing batch, ingredient lots and packaging lots.
+15.	Forward trace from ingredient or packaging lot returns impacted records.
+16.	Scheduled reports can be configured, manually triggered and logged.
+17.	Report recipients can be assigned globally, per report and by role.
+18.	Real-time notification rules can create alert events and send emails where enabled.
+19.	Completed/reviewed record edits create audit entries.
+20.	Visual QA comparison is not required in MVP and does not block implementation.
+20. Claude AI Build Prompt
+The following can be pasted directly into Claude AI as a build instruction.
+You are building a Digital Batch Manufacturing & Traceability System for a Wet Mustard manufacturing operation. Do not build a generic form digitiser. Build an MO-driven lightweight MES-style web application.
+
+Core objective:
+Create data once and reuse it across manufacturing batch records, metal detector checks, pallecon filling, bucket packing, drum processing, packaging lot traceability, scheduled reporting, alerts, exports and WinMan existing-MO booking.
+
+Important scope exclusion:
+Visual QA standards and product image comparison are out of scope for MVP. DBMTS must also not create new WinMan manufacturing orders in MVP; it consumes existing outstanding WinMan MOs only.
+
+Source references:
+- Batchcards: WM018, WM019, WM020, WM021, WM022, WM023, WM025, WM034, WM036, WM039, WM042, WM044, WM045, WM048 and WM049.
+- Pallecon filling: WM004.
+- Metal detector verification: WM011.
+- Packaging traceability: WM014, WM015 and WM047.
+- Bucket processing: WM016.
+- Drum processing: WM046.
+- Product master data: WM024.
+- MintSystemNew Email Reporting Specification: adopt the configurable reporting pattern, recipients, date offsets, Send Now and scheduled email concepts.
+- WinMan ERP Integration Specification: consume existing WinMan MOs from ManufacturingOrders joined to Products; map ProductMaster RecipeCode and FinishedGoodsCode to WinMan ProductId; store ManufacturingOrders.ManufacturingOrder as the internal BIGINT used for stored procedures; store ManufacturingOrderId as the display reference; fetch live BOM/components from WorkInProgress joined to Products; use Products.PackSize for quantity conversion; use approved stored procedures only for finished-goods booking; do not directly insert/update WinMan tables.
+- QA standards are reference only and must not drive visual QA automation in MVP.
+
+System modules:
+1. Product, recipe and batch-size variant master data including WinMan ProductId, internal WinMan product key and PackSize.
+2. Existing WinMan MO search and selection; no WinMan MO creation in MVP.
+3. Live WorkInProgress component/BOM fetch and component snapshot storage.
+4. MO-driven batch record creation.
+5. Ingredient lot capture and weighed/tipped sign-offs.
+6. Process step and process parameter capture.
+7. Metal detector verification.
+8. Pallecon filling.
+9. Bucket packing and pallet records.
+10. Drum processing records.
+11. Packaging traceability for drums, buckets and lids, including NVE-number supplier formats.
+12. Forward and backward traceability reporting.
+13. Scheduled reports, manual Send Now and report send log.
+14. Real-time notification rules for operational exceptions.
+15. Electronic signatures and audit trail.
+16. WinMan finished-goods booking to existing MOs using duplicate checks, LastModifiedDate concurrency and local WinManBookingLog.
+
+Please generate:
+- Database schema including RecipeBatchVariant, ManufacturingOrder with WinMan identifiers, WinManMOComponentSnapshot, WinManBookingLog, DrumProcessingRun, DrumProcessingPallet, DrumRecord, ReportConfig, ReportRecipient, ReportSendLog, NotificationRule and NotificationEvent tables.
+- API endpoints for WinMan MO search, WinMan component fetch, production records, finished-goods booking, reporting admin, Send Now, recipient management and notification rules.
+- UI screen structure.
+- Validation rules including existing-MO only, local duplicate booking prevention, WinMan Inventory lot duplicate checks, outstanding quantity checks and LastModifiedDate concurrency checks.
+- Role permissions.
+- Initial implementation plan.
+- Example code structure for the selected framework.

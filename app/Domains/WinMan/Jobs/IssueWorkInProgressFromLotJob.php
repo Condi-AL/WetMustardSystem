@@ -1,0 +1,211 @@
+<?php
+
+namespace App\Domains\WinMan\Jobs;
+
+use App\Domains\WinMan\Exceptions\WinManException;
+use App\Domains\WinMan\Support\WinManConnection;
+use PDO;
+
+/**
+ * Issues a specific quantity from a selected lot against a specific WinMan
+ * WorkInProgress line using approved WinMan procedures.
+ *
+ * @return array{issued_quantity: float, issued_inventory_ids: array<int, int>}
+ */
+class IssueWorkInProgressFromLotJob
+{
+    public function __construct(
+        private readonly WinManConnection $winman,
+    ) {
+    }
+
+    /**
+     * @param  array{work_in_progress: int, component_product: int, lot_number: string, quantity: float, user_name: string}  $params
+     * @return array{issued_quantity: float, issued_inventory_ids: array<int, int>}
+     */
+    public function __invoke(array $params): array
+    {
+        $workInProgress = (int) $params['work_in_progress'];
+        $componentProduct = (int) $params['component_product'];
+        $lotNumber = trim((string) $params['lot_number']);
+        $quantity = (float) $params['quantity'];
+        $userName = trim((string) $params['user_name']) !== ''
+            ? trim((string) $params['user_name'])
+            : 'DBMTS';
+
+        if ($workInProgress <= 0) {
+            throw new WinManException('A valid WorkInProgress line is required to issue to WinMan.');
+        }
+
+        if ($componentProduct <= 0) {
+            throw new WinManException('A valid WinMan component product is required to issue to WinMan.');
+        }
+
+        if ($lotNumber === '') {
+            throw new WinManException('A lot number is required to issue to WinMan.');
+        }
+
+        if ($quantity <= 0) {
+            throw new WinManException('Issue quantity must be greater than zero.');
+        }
+
+        /** @var \Illuminate\Database\Connection $connection */
+        $connection = $this->winman->connection();
+        $inventoryIssueProcedure = (string) config('winman.issue.inventory_issue_procedure', 'wsp_InventoryIssue');
+        $nonWmGoProcedure = (string) config('winman.issue.non_wmgo_procedure', 'bsp_ManufacturingOrdersIssueNonWMGO');
+        $runNonWmGoAfterIssue = (bool) config('winman.issue.run_non_wmgo_after_issue', false);
+
+        $context = $connection->selectOne(
+            'SELECT TOP (1)
+                w.WorkInProgress,
+                w.QuantityOutstanding,
+                mo.ManufacturingOrder,
+                mo.Site,
+                mo.LastModifiedDate
+             FROM WorkInProgress w
+             INNER JOIN ManufacturingOrders mo ON mo.ManufacturingOrder = w.ManufacturingOrder
+             WHERE w.WorkInProgress = ?',
+            [$workInProgress],
+        );
+
+        if ($context === null) {
+            throw new WinManException('WinMan WorkInProgress line could not be found.');
+        }
+
+        $quantityOutstanding = (float) ($context->QuantityOutstanding ?? 0);
+        if ($quantity > $quantityOutstanding + 0.0001) {
+            throw new WinManException('Issue quantity exceeds WinMan outstanding quantity for this BOM line.');
+        }
+
+        $site = (int) ($context->Site ?? 0);
+        $manufacturingOrder = (int) ($context->ManufacturingOrder ?? 0);
+        $lastModifiedDate = (string) ($context->LastModifiedDate ?? '');
+
+        $inventoryRows = $connection->select(
+            'SELECT i.Inventory, i.QuantityOutstanding
+             FROM Inventory i
+             WHERE i.Product = ?
+               AND i.LotNumber = ?
+               AND i.QuantityOutstanding > 0
+             ORDER BY i.ExpiryDate ASC, i.Inventory ASC',
+            [$componentProduct, $lotNumber],
+        );
+
+        if ($inventoryRows === []) {
+            throw new WinManException('No available WinMan inventory rows were found for the selected lot.');
+        }
+
+        $issuedInventoryIds = [];
+
+        $connection->transaction(function () use (
+            $connection,
+            $inventoryRows,
+            $quantity,
+            $workInProgress,
+            $site,
+            $manufacturingOrder,
+            $lastModifiedDate,
+            $userName,
+            $inventoryIssueProcedure,
+            $nonWmGoProcedure,
+            $runNonWmGoAfterIssue,
+            &$issuedInventoryIds,
+        ): void {
+            $remaining = $quantity;
+
+            foreach ($inventoryRows as $row) {
+                if ($remaining <= 0) {
+                    break;
+                }
+
+                $inventoryId = (int) ($row->Inventory ?? 0);
+                $available = (float) ($row->QuantityOutstanding ?? 0);
+
+                if ($inventoryId <= 0 || $available <= 0) {
+                    continue;
+                }
+
+                $toIssue = min($remaining, $available);
+
+                $pdo = $connection->getPdo();
+                $errorMessage = '';
+
+                $statement = $pdo->prepare("{CALL {$inventoryIssueProcedure}(?,?,?,?,?,?,?,?,?,?,?,?)}");
+                $statement->bindValue(1, $inventoryId, PDO::PARAM_INT);
+                $statement->bindValue(2, $toIssue);
+                $statement->bindValue(3, $workInProgress, PDO::PARAM_INT);
+                $statement->bindValue(4, $userName);
+                $statement->bindParam(5, $errorMessage, PDO::PARAM_STR | PDO::PARAM_INPUT_OUTPUT, 4000);
+                $statement->bindValue(6, null, PDO::PARAM_NULL);
+                $statement->bindValue(7, $site, PDO::PARAM_INT);
+                $statement->bindValue(8, null, PDO::PARAM_NULL);
+                $statement->bindValue(9, 0, PDO::PARAM_INT);
+                $statement->bindValue(10, null, PDO::PARAM_NULL);
+                $statement->bindValue(11, 1, PDO::PARAM_INT);
+                $statement->bindValue(12, 1, PDO::PARAM_INT);
+                $statement->execute();
+
+                // Drain any result sets before reading output parameters.
+                do {
+                    // no-op
+                } while ($this->advanceRowset($statement));
+
+                $errorMessage = trim((string) $errorMessage);
+                if ($errorMessage !== '') {
+                    throw new WinManException("Error when issuing inventory {$inventoryId}: {$errorMessage}");
+                }
+
+                $issuedInventoryIds[] = $inventoryId;
+                $remaining -= $toIssue;
+            }
+
+            if ($remaining > 0.0001) {
+                throw new WinManException('Selected lot does not have enough available quantity to satisfy this issue.');
+            }
+
+            if ($runNonWmGoAfterIssue) {
+                $pdo = $connection->getPdo();
+                $statement = $pdo->prepare(
+                    "DECLARE @RC int;
+                     EXEC @RC = dbo.{$nonWmGoProcedure} ?, ?, ?;
+                     SELECT @RC AS ReturnCode;"
+                );
+                $statement->bindValue(1, $manufacturingOrder, PDO::PARAM_INT);
+                $statement->bindValue(2, $userName);
+                $statement->bindValue(3, $lastModifiedDate);
+                $statement->execute();
+
+                $returnCode = 0;
+                do {
+                    if ($statement->columnCount() <= 0) {
+                        continue;
+                    }
+
+                    $row = $statement->fetch(PDO::FETCH_ASSOC);
+                    if ($row !== false && array_key_exists('ReturnCode', $row)) {
+                        $returnCode = (int) $row['ReturnCode'];
+                        break;
+                    }
+                } while ($this->advanceRowset($statement));
+
+                if ($returnCode === -1) {
+                    throw new WinManException('Error when issuing Non WM Go components.');
+                }
+            }
+        });
+
+        return [
+            'issued_quantity' => $quantity,
+            'issued_inventory_ids' => array_values(array_unique($issuedInventoryIds)),
+        ];
+    }
+
+    private function advanceRowset(\PDOStatement $statement): bool
+    {
+        try {
+            return $statement->nextRowset();
+        } catch (\PDOException) {
+            return false;
+        }
+    }
+}
