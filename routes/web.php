@@ -55,8 +55,8 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Volt::route('manufacturing-orders', 'pages.manufacturing-orders.search')
         ->name('manufacturing-orders.search');
 
-    Volt::route('manufacturing-orders/{winmanMo}', 'pages.manufacturing-orders.show')
-        ->name('manufacturing-orders.show');
+    Volt::route('manufacturing-orders/{winmanMo}/workspace', 'pages.manufacturing-orders.workspace')
+        ->name('manufacturing-orders.workspace');
 
     Volt::route('batches/{batch}', 'pages.batches.show')
         ->name('batches.show');

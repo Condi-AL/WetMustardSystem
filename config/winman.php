@@ -88,6 +88,10 @@ return [
         'non_wmgo_procedure' => 'bsp_ManufacturingOrdersIssueNonWMGO',
         // Keep disabled for line-by-line allocation to avoid issuing unrelated MO lines.
         'run_non_wmgo_after_issue' => env('WINMAN_ISSUE_RUN_NON_WMGO_AFTER_ISSUE', false),
+        // Optional status-only call that can transition MO state (for example F -> I)
+        // without issuing additional materials.
+        'status_only_procedure' => env('WINMAN_ISSUE_STATUS_ONLY_PROCEDURE', 'bsp_ManufacturingOrdersSetIssuedStatus'),
+        'run_status_only_after_issue' => env('WINMAN_ISSUE_RUN_STATUS_ONLY_AFTER_ISSUE', true),
         'user_name' => env('WINMAN_ISSUE_USER', env('WINMAN_BOOKING_USER', 'DBMTS')),
     ],
 

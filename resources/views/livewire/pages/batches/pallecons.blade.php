@@ -35,9 +35,7 @@ new #[Layout('layouts.app')] #[Title('Pallecon Filling')] class extends Componen
 
     public function mount(BatchRecord $batch): void
     {
-        $this->batch = $batch->load(['pallecons.checkedBy', 'manufacturingOrder']);
-        $this->bartender_enabled = (bool) config('services.bartender.enabled', false);
-        $this->label_production_date = now()->toDateString();
+        $this->redirectRoute('batches.show', ['batch' => $batch, 'tab' => 'packing'], navigate: true);
     }
 
     public function addPallecon(): void
@@ -150,6 +148,14 @@ new #[Layout('layouts.app')] #[Title('Pallecon Filling')] class extends Componen
         $this->reset('form');
         $this->form['fill_weight'] = '1';
         $this->batch = $this->batch->fresh(['pallecons.checkedBy', 'manufacturingOrder']);
+
+        if (in_array((string) $this->batch->status, [
+            BatchRecord::STATUS_COMPLETED,
+            BatchRecord::STATUS_QA_REVIEW,
+            BatchRecord::STATUS_CLOSED,
+        ], true)) {
+            $this->redirectRoute('batches.show', ['batch' => $this->batch, 'tab' => 'batch'], navigate: true);
+        }
     }
 
     private function resolveWinManLotNumber(PalleconRecord $pallecon): string
@@ -350,14 +356,14 @@ new #[Layout('layouts.app')] #[Title('Pallecon Filling')] class extends Componen
 }; ?>
 
 <div class="py-8">
-    <div class="max-w-6xl mx-auto sm:px-6 lg:px-8 space-y-6">
+    <div class="max-w-7xl mx-auto sm:px-6 lg:px-8 space-y-6">
 
-        <div class="flex items-center justify-between">
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.04);padding:20px 24px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;">
             <div>
-                <h2 class="text-xl font-semibold text-gray-800">Pallecon Filling</h2>
-                <p class="text-sm text-gray-500">Batch {{ $batch->batch_number }} · bulk fill traceability (WM004)</p>
+                <h2 class="text-xl font-semibold text-slate-900">Pallecon Packing</h2>
+                <p class="text-sm text-slate-500">Batch {{ $batch->batch_number }} · bulk fill traceability (WM004)</p>
             </div>
-            <a href="{{ route('batches.show', $batch) }}" wire:navigate class="text-sm text-indigo-600 hover:underline">← Batch record</a>
+            <a href="{{ route('batches.show', ['batch' => $batch, 'tab' => 'batch']) }}" wire:navigate style="display:inline-flex;align-items:center;padding:10px 14px;border-radius:10px;background:#eef2ff;border:1px solid #c7d2fe;color:#4338ca;font-size:13px;font-weight:700;text-decoration:none;">← Batch record</a>
         </div>
 
         @if ($print_message)
@@ -367,7 +373,7 @@ new #[Layout('layouts.app')] #[Title('Pallecon Filling')] class extends Componen
         @endif
 
         @if ($winman_booking_preview)
-            <div class="border border-emerald-200 rounded-lg p-4 bg-emerald-50">
+            <div class="border border-emerald-200 rounded-lg p-4 bg-emerald-50 shadow-sm">
                 <h3 class="text-sm font-semibold text-emerald-800 mb-3">WinMan Inventory Insert Preview (Last Add)</h3>
 
                 <div class="w-full rounded-lg border border-emerald-200 bg-white p-4">
@@ -396,7 +402,12 @@ new #[Layout('layouts.app')] #[Title('Pallecon Filling')] class extends Componen
             </div>
         @endif
 
-        <form wire:submit="addPallecon" class="bg-white shadow-sm rounded-lg p-6 space-y-4">
+        <form wire:submit="addPallecon" class="bg-white shadow-sm rounded-xl border border-slate-200 overflow-hidden">
+            <div style="padding:14px 18px;border-bottom:1px solid #dbe1ea;background:linear-gradient(180deg,#eef2ff 0%,#f8fafc 100%);">
+                <div class="text-xs font-semibold uppercase tracking-wide text-indigo-700">Pallecon Entry</div>
+                <div class="text-sm text-slate-600 mt-1">Capture packing identifiers, fill weight, and label/booking parameters.</div>
+            </div>
+            <div class="p-6 space-y-4">
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
                     <label class="block text-xs text-gray-600 mb-1">Pallecon Number</label>
@@ -426,12 +437,16 @@ new #[Layout('layouts.app')] #[Title('Pallecon Filling')] class extends Componen
             </div>
 
             <div>
-                <x-primary-button type="submit" class="w-full justify-center">Complete Batch</x-primary-button>
+                <x-primary-button type="submit" class="w-full justify-center">Add Pallecon</x-primary-button>
+            </div>
             </div>
         </form>
 
-        <div class="border border-slate-200 rounded-lg p-4 bg-slate-50">
-            <h3 class="text-sm font-semibold text-slate-700 mb-3">Label Preview (Before Print)</h3>
+        <div class="border border-slate-200 rounded-xl overflow-hidden bg-slate-50 shadow-sm">
+            <div style="padding:14px 18px;border-bottom:1px solid #dbe1ea;background:linear-gradient(180deg,#f8fafc 0%,#f1f5f9 100%);">
+                <h3 class="text-sm font-semibold text-slate-700">Label Preview (Before Print)</h3>
+            </div>
+            <div class="p-4">
 
             @if (isset($this->labelPreview['error']))
                 <p class="text-xs text-red-700">Preview unavailable: {{ $this->labelPreview['error'] }}</p>
@@ -454,6 +469,7 @@ new #[Layout('layouts.app')] #[Title('Pallecon Filling')] class extends Componen
                         </div>
                     </div>
             @endif
+            </div>
         </div>
 
         {{-- Recorded pallecons list intentionally hidden for single-label workflow. --}}

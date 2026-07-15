@@ -83,6 +83,11 @@ class BatchRecord extends Model
         return $this->hasMany(PalleconRecord::class);
     }
 
+    public function palleconSubmissionAudits(): HasMany
+    {
+        return $this->hasMany(PalleconSubmissionAudit::class);
+    }
+
     public function packingRuns(): HasMany
     {
         return $this->hasMany(PackingRun::class);

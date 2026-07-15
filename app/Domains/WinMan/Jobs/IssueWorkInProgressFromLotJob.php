@@ -54,6 +54,8 @@ class IssueWorkInProgressFromLotJob
         $inventoryIssueProcedure = (string) config('winman.issue.inventory_issue_procedure', 'wsp_InventoryIssue');
         $nonWmGoProcedure = (string) config('winman.issue.non_wmgo_procedure', 'bsp_ManufacturingOrdersIssueNonWMGO');
         $runNonWmGoAfterIssue = (bool) config('winman.issue.run_non_wmgo_after_issue', false);
+        $statusOnlyProcedure = (string) config('winman.issue.status_only_procedure', 'bsp_ManufacturingOrdersSetIssuedStatus');
+        $runStatusOnlyAfterIssue = (bool) config('winman.issue.run_status_only_after_issue', false);
 
         $context = $connection->selectOne(
             'SELECT TOP (1)
@@ -109,6 +111,8 @@ class IssueWorkInProgressFromLotJob
             $inventoryIssueProcedure,
             $nonWmGoProcedure,
             $runNonWmGoAfterIssue,
+            $statusOnlyProcedure,
+            $runStatusOnlyAfterIssue,
             &$issuedInventoryIds,
         ): void {
             $remaining = $quantity;
@@ -136,7 +140,8 @@ class IssueWorkInProgressFromLotJob
                 $statement->bindValue(3, $workInProgress, PDO::PARAM_INT);
                 $statement->bindValue(4, $userName);
                 $statement->bindParam(5, $errorMessage, PDO::PARAM_STR | PDO::PARAM_INPUT_OUTPUT, 4000);
-                $statement->bindValue(6, null, PDO::PARAM_NULL);
+                // Pass ManualInventory so WinMan can transition the MO from R -> I on first issue.
+                $statement->bindValue(6, $inventoryId, PDO::PARAM_INT);
                 $statement->bindValue(7, $site, PDO::PARAM_INT);
                 $statement->bindValue(8, null, PDO::PARAM_NULL);
                 $statement->bindValue(9, 0, PDO::PARAM_INT);
@@ -190,6 +195,36 @@ class IssueWorkInProgressFromLotJob
 
                 if ($returnCode === -1) {
                     throw new WinManException('Error when issuing Non WM Go components.');
+                }
+            }
+
+            if ($runStatusOnlyAfterIssue && $statusOnlyProcedure !== '') {
+                $pdo = $connection->getPdo();
+                $statement = $pdo->prepare(
+                    "DECLARE @RC int;
+                     EXEC @RC = dbo.{$statusOnlyProcedure} ?, ?, ?;
+                     SELECT @RC AS ReturnCode;"
+                );
+                $statement->bindValue(1, $manufacturingOrder, PDO::PARAM_INT);
+                $statement->bindValue(2, $userName);
+                $statement->bindValue(3, null, PDO::PARAM_NULL);
+                $statement->execute();
+
+                $returnCode = 0;
+                do {
+                    if ($statement->columnCount() <= 0) {
+                        continue;
+                    }
+
+                    $row = $statement->fetch(PDO::FETCH_ASSOC);
+                    if ($row !== false && array_key_exists('ReturnCode', $row)) {
+                        $returnCode = (int) $row['ReturnCode'];
+                        break;
+                    }
+                } while ($this->advanceRowset($statement));
+
+                if ($returnCode === -1) {
+                    throw new WinManException('Error when setting MO status to Issued in WinMan.');
                 }
             }
         });

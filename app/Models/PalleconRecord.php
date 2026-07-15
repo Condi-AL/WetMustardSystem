@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /**
  * DBMTS Pallecon Filling record (scope entity: PalleconRecord).
@@ -44,5 +45,10 @@ class PalleconRecord extends Model
     public function checkedBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'checked_by');
+    }
+
+    public function submissionAudits(): HasMany
+    {
+        return $this->hasMany(PalleconSubmissionAudit::class);
     }
 }

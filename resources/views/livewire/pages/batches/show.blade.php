@@ -7,12 +7,18 @@ use App\Features\Batches\CompleteBatchFeature;
 use App\Features\Batches\RejectBatchQaFeature;
 use App\Features\Batches\GetAvailableIngredientLotsFeature;
 use App\Features\Booking\BookFinishedGoodsFeature;
+use App\Features\Pallecon\AddPalleconRecordFeature;
+use App\Features\Pallecon\PrintPalleconLabelFeature;
 use App\Domains\WinMan\Exceptions\WinManException;
 use App\Domains\WinMan\Jobs\FetchManufacturingOrderJob;
 use App\Domains\WinMan\Jobs\ListIssuedLotsForWorkInProgressJob;
 use App\Operations\AllocateBomIngredientOperation;
 use App\Models\BatchRecord;
+use App\Models\PalleconRecord;
+use App\Models\PalleconSubmissionAudit;
+use App\Models\WinManBookingLog;
 use App\Models\WinManIssueLog;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Livewire\Attributes\Layout;
 use Livewire\Attributes\Title;
@@ -73,9 +79,35 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
 
     public string $startOverQuantity = '';
 
+    /** @var array<string, mixed> */
+    public array $palleconForm = [
+        'ticket_number' => '',
+        'serial_number' => '',
+        'top_seal_number' => '',
+        'bottom_seal_number' => '',
+        'liner_number' => '',
+        'liner_batch_code' => '',
+        'fill_weight' => '1',
+        'start_time' => '',
+        'finish_time' => '',
+    ];
+
+    public bool $bartender_enabled = false;
+
+    public string $label_production_date = '';
+
+    public ?string $print_message = null;
+
+    public bool $print_failed = false;
+
+    /** @var array<string, mixed>|null */
+    public ?array $winman_booking_preview = null;
+
     public function mount(BatchRecord $batch): void
     {
         $this->batch = $batch;
+        $this->bartender_enabled = (bool) config('services.bartender.enabled', false);
+        $this->label_production_date = now()->toDateString();
         $this->reload();
     }
 
@@ -293,6 +325,20 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
         $classification = (int) ($this->batch->manufacturingOrder?->winman_classification ?? 0);
         $winmanMo = (int) ($this->batch->manufacturingOrder?->winman_manufacturing_order ?? 0);
 
+        $batchAllowsNext = in_array((string) $this->batch->status, [
+            BatchRecord::STATUS_COMPLETED,
+            BatchRecord::STATUS_QA_REVIEW,
+            BatchRecord::STATUS_CLOSED,
+        ], true);
+
+        return $classification === 30 && $winmanMo > 0 && $batchAllowsNext;
+    }
+
+    public function getCanAddBatchForMoProperty(): bool
+    {
+        $classification = (int) ($this->batch->manufacturingOrder?->winman_classification ?? 0);
+        $winmanMo = (int) ($this->batch->manufacturingOrder?->winman_manufacturing_order ?? 0);
+
         return $classification === 30 && $winmanMo > 0;
     }
 
@@ -302,8 +348,21 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
             return null;
         }
 
-        return route('manufacturing-orders.show', [
-            'winmanMo' => (int) $this->batch->manufacturingOrder->winman_manufacturing_order,
+        return route('manufacturing-orders.workspace', [
+            'winmanMo' => (int) ($this->batch->manufacturingOrder?->winman_manufacturing_order ?? 0),
+        ]);
+    }
+
+    public function getWorkspaceUrlProperty(): ?string
+    {
+        $winmanMo = (int) ($this->batch->manufacturingOrder?->winman_manufacturing_order ?? 0);
+
+        if ($winmanMo <= 0) {
+            return null;
+        }
+
+        return route('manufacturing-orders.workspace', [
+            'winmanMo' => $winmanMo,
         ]);
     }
 
@@ -351,6 +410,34 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
         return $moRef.'-'.$datePart;
     }
 
+    public function getDisplayBatchReferenceProperty(): string
+    {
+        if ($this->packingMode !== 'pallecon') {
+            return (string) ($this->batch->batch_number ?? '');
+        }
+
+        $bookingLog = $this->batch->bookingLogs
+            ->where('booking_status', WinManBookingLog::STATUS_SUCCESS)
+            ->sortByDesc('id')
+            ->first();
+
+        return trim((string) ($bookingLog?->lot_number ?? ''));
+    }
+
+    public function getDisplayBatchReferenceStyleProperty(): string
+    {
+        $length = mb_strlen(trim($this->displayBatchReference));
+
+        $fontSize = match (true) {
+            $length >= 28 => '18px',
+            $length >= 22 => '22px',
+            $length >= 16 => '26px',
+            default => '34px',
+        };
+
+        return "margin-top:8px;font-size:{$fontSize};line-height:1.05;font-weight:800;color:#0f172a;min-height:36px;white-space:normal;overflow-wrap:anywhere;word-break:break-word;max-width:100%;";
+    }
+
     public function complete(): void
     {
         $this->authorizeEditable();
@@ -376,7 +463,8 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
 
     public function getCanResetBatchProperty(): bool
     {
-        return ! $this->hasIssuedIngredients;
+        return ! $this->hasIssuedIngredients
+            && $this->batch->status === BatchRecord::STATUS_IN_PROGRESS;
     }
 
     public function openAmendBatch(): void
@@ -480,7 +568,7 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
         });
 
         if ($winmanMo > 0) {
-            $this->redirectRoute('manufacturing-orders.show', ['winmanMo' => $winmanMo], navigate: true);
+            $this->redirectRoute('manufacturing-orders.workspace', ['winmanMo' => $winmanMo], navigate: true);
 
             return;
         }
@@ -580,6 +668,334 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
         $this->reload();
     }
 
+    public function addPallecon(): void
+    {
+        if ((string) ($this->palleconForm['fill_weight'] ?? '') === '') {
+            $this->syncPalleconDefaults();
+        }
+
+        $submittedToWinmanSuccessfully = false;
+        $labelPreviewSnapshot = $this->labelPreview;
+
+        $validated = $this->validate([
+            'palleconForm.ticket_number' => ['required', 'string', 'max:255'],
+            'palleconForm.serial_number' => ['nullable', 'string', 'max:255'],
+            'palleconForm.top_seal_number' => ['nullable', 'string', 'max:255'],
+            'palleconForm.bottom_seal_number' => ['nullable', 'string', 'max:255'],
+            'palleconForm.liner_number' => ['nullable', 'string', 'max:255'],
+            'palleconForm.liner_batch_code' => ['nullable', 'string', 'max:255'],
+            'palleconForm.fill_weight' => ['required', 'numeric', 'min:0'],
+            'palleconForm.start_time' => ['nullable', 'date'],
+            'palleconForm.finish_time' => ['nullable', 'date'],
+        ])['palleconForm'];
+
+        $validated['start_time'] = $validated['start_time'] ? Carbon::parse($validated['start_time']) : null;
+        $validated['finish_time'] = $validated['finish_time'] ? Carbon::parse($validated['finish_time']) : null;
+        $validated['fill_weight'] = $validated['fill_weight'] !== '' ? $validated['fill_weight'] : null;
+
+        $pallecon = app(AddPalleconRecordFeature::class)($this->batch, $validated, auth()->user());
+
+        $messages = [];
+        $this->print_message = null;
+        $this->print_failed = false;
+
+        if ((bool) config('winman.booking.enabled', false)) {
+            try {
+                $bookedQuantity = (float) ($pallecon->fill_weight ?? 0);
+
+                if ($bookedQuantity > 0) {
+                    $finished = now();
+                    $expiry = $this->resolveBookingExpiryDate($pallecon, $finished);
+                    $lotNumber = $this->resolveWinManLotNumber($pallecon);
+                    $requestPreview = [
+                        'manufacturing_order_id' => (string) ($this->batch->manufacturingOrder?->winman_manufacturing_order_id ?? $pallecon->mo_number ?? ''),
+                        'manufacturing_order_internal' => (int) ($this->batch->manufacturingOrder?->winman_manufacturing_order ?? 0),
+                        'product_id' => (string) ($this->batch->manufacturingOrder?->winman_product_id ?? ''),
+                        'quantity_kg' => $bookedQuantity,
+                        'lot_number' => $lotNumber,
+                        'finished_date' => $finished->format('Y-m-d H:i:s'),
+                        'expiry_date' => $expiry->format('Y-m-d H:i:s'),
+                        'pallecon_number' => (string) ($pallecon->ticket_number ?? ''),
+                    ];
+
+                    $log = app(BookFinishedGoodsFeature::class)(
+                        $this->batch,
+                        $bookedQuantity,
+                        $lotNumber,
+                        [$lotNumber],
+                        $finished,
+                        $expiry,
+                        auth()->user(),
+                        true,
+                    );
+
+                    $this->winman_booking_preview = $requestPreview + [
+                        'booking_status' => (string) $log->booking_status,
+                        'winman_inventory_id' => $log->winman_inventory_id !== null ? (string) $log->winman_inventory_id : null,
+                        'error_message' => $log->error_message,
+                        'booked_at' => $log->booking_date?->format('Y-m-d H:i:s') ?? now()->format('Y-m-d H:i:s'),
+                        'booked_quantity_kg_logged' => $log->quantity_booked_kg !== null ? (string) $log->quantity_booked_kg : null,
+                        'booked_quantity_traded_units' => $log->quantity_booked_traded_units !== null ? (string) $log->quantity_booked_traded_units : null,
+                        'logged_lot_number' => $log->lot_number,
+                    ];
+
+                    if ($log->booking_status === 'success') {
+                        $submittedToWinmanSuccessfully = true;
+                        $messages[] = 'WinMan inventory created (Inventory '.($log->winman_inventory_id ?? '—').').';
+                    } else {
+                        $this->print_failed = true;
+                        $messages[] = 'WinMan booking '.$log->booking_status.': '.($log->error_message ?: 'unknown error').'.';
+                    }
+                } else {
+                    $this->winman_booking_preview = [
+                        'booking_status' => 'skipped',
+                        'error_message' => 'Fill weight is zero.',
+                    ];
+                    $messages[] = 'WinMan booking skipped because fill weight is zero.';
+                }
+            } catch (\Throwable $e) {
+                $this->print_failed = true;
+                $this->winman_booking_preview = [
+                    'booking_status' => 'failed',
+                    'error_message' => $e->getMessage(),
+                ];
+                $messages[] = 'Pallecon saved, but WinMan booking failed: '.$e->getMessage();
+            }
+        }
+
+        if ($this->bartender_enabled) {
+            try {
+                $result = app(PrintPalleconLabelFeature::class)($pallecon, 1, [
+                    'production_date' => $this->label_production_date,
+                ]);
+                $messages[] = $this->formatPrintMessage($result);
+            } catch (\Throwable $e) {
+                $this->print_failed = true;
+                $messages[] = 'Pallecon saved, but label print failed: '.$e->getMessage();
+            }
+        }
+
+        if ($messages !== []) {
+            $this->print_message = implode(' ', $messages);
+        }
+
+        PalleconSubmissionAudit::create([
+            'batch_record_id' => $this->batch->id,
+            'pallecon_record_id' => $pallecon->id,
+            'submitted_by' => auth()->id(),
+            'submitted_at' => now(),
+            'booking_status' => (string) ($this->winman_booking_preview['booking_status'] ?? 'not_attempted'),
+            'print_status' => $this->bartender_enabled
+                ? ($this->print_failed ? 'failed' : 'success')
+                : 'disabled',
+            'winman_preview' => $this->winman_booking_preview,
+            'label_preview' => is_array($labelPreviewSnapshot) ? $labelPreviewSnapshot : null,
+        ]);
+
+        if ($submittedToWinmanSuccessfully && $this->batch->status === BatchRecord::STATUS_IN_PROGRESS) {
+            app(\App\Domains\Batch\Jobs\CompleteBatchJob::class)($this->batch, auth()->user());
+            $messages[] = 'Batch status changed to Completed.';
+
+            if ($messages !== []) {
+                $this->print_message = implode(' ', $messages);
+            }
+        }
+
+        $this->reset('palleconForm');
+        $this->syncPalleconDefaults();
+        $this->reload();
+        $this->dispatch('switch-batch-tab', tab: 'packing');
+    }
+
+    private function resolveWinManLotNumber(PalleconRecord $pallecon): string
+    {
+        $moId = trim((string) ($this->batch->manufacturingOrder?->winman_manufacturing_order_id
+            ?? $pallecon->mo_number
+            ?? 'MO'));
+        $palleconNumber = trim((string) ($pallecon->ticket_number ?? ''));
+        $labelStyleLot = $this->resolveLabelStyleLotNumber();
+
+        $moId = strtoupper((string) preg_replace('/[^A-Za-z0-9]/', '', $moId));
+        $palleconNumber = strtoupper((string) preg_replace('/[^A-Za-z0-9]/', '', $palleconNumber));
+
+        if ($moId === '') {
+            $moId = 'MO';
+        }
+
+        if ($palleconNumber === '') {
+            $palleconNumber = 'P'.$pallecon->id;
+        }
+
+        $fullLot = trim($moId.' '.$palleconNumber.' '.$labelStyleLot);
+
+        return substr($fullLot, 0, 100);
+    }
+
+    private function resolveLabelStyleLotNumber(): string
+    {
+        $productionDate = $this->label_production_date !== ''
+            ? Carbon::parse($this->label_production_date)
+            : now();
+
+        $yjjj = $productionDate->format('y');
+        $yjjj = substr($yjjj, -1).str_pad((string) $productionDate->dayOfYear, 3, '0', STR_PAD_LEFT);
+
+        return $yjjj.'00M96';
+    }
+
+    private function resolveBookingExpiryDate(PalleconRecord $pallecon, Carbon $fallbackBase): Carbon
+    {
+        $productionDate = $this->label_production_date !== ''
+            ? Carbon::parse($this->label_production_date)
+            : now();
+
+        $previewPallecon = new PalleconRecord([
+            'mo_number' => $this->batch->manufacturingOrder?->mo_number,
+            'fill_weight' => (float) ($pallecon->fill_weight ?? 0),
+        ]);
+        $previewPallecon->setRelation('batchRecord', $this->batch);
+
+        try {
+            $payload = app(PrintPalleconLabelFeature::class)->buildPrintPayload($previewPallecon, 1, [
+                'production_date' => $productionDate->toDateString(),
+            ]);
+
+            $sources = is_array($payload['options']['named_data_sources'] ?? null)
+                ? $payload['options']['named_data_sources']
+                : [];
+
+            $bbeFormat = strtoupper(trim((string) ($sources['BBEformat'] ?? '')));
+            $bbeValue = isset($sources['BBE']) && is_numeric((string) $sources['BBE'])
+                ? max(1, (int) $sources['BBE'])
+                : null;
+
+            if ($bbeValue !== null && $bbeFormat === 'DDMMYYYY') {
+                return $productionDate->copy()->addDays($bbeValue)->endOfDay();
+            }
+
+            if ($bbeValue !== null && $bbeFormat === 'MMYYYY') {
+                return $productionDate->copy()->addMonthsNoOverflow($bbeValue)->endOfMonth();
+            }
+
+            $bestBeforeRaw = trim((string) ($sources['BestBeforeEnd'] ?? ''));
+
+            if ($bestBeforeRaw !== '') {
+                if (preg_match('/^\d{2}\/\d{2}\/\d{4}$/', $bestBeforeRaw) === 1) {
+                    return Carbon::createFromFormat('d/m/Y', $bestBeforeRaw)->endOfDay();
+                }
+
+                if (preg_match('/^\d{2}\/\d{4}$/', $bestBeforeRaw) === 1) {
+                    return Carbon::createFromFormat('m/Y', $bestBeforeRaw)->endOfMonth();
+                }
+
+                return Carbon::parse($bestBeforeRaw)->endOfDay();
+            }
+        } catch (\Throwable) {
+        }
+
+        $shelfDays = (int) ($this->batch->product?->shelf_life_days ?? 180);
+
+        return $fallbackBase->copy()->addDays($shelfDays)->endOfMonth();
+    }
+
+    /** @param array<string, mixed> $result */
+    private function formatPrintMessage(array $result): string
+    {
+        $requestId = isset($result['printRequestID']) ? (string) $result['printRequestID'] : null;
+        $messages = isset($result['messages']) && is_array($result['messages']) ? $result['messages'] : [];
+        $printer = null;
+
+        foreach ($messages as $message) {
+            if (! is_string($message)) {
+                continue;
+            }
+
+            if (preg_match('/Printer:\s*(.+)$/m', $message, $matches) === 1) {
+                $printer = trim($matches[1]);
+                break;
+            }
+        }
+
+        $parts = ['Pallecon saved and BarTender sent the job to the spooler.'];
+
+        if ($requestId) {
+            $parts[] = 'Request ID: '.$requestId.'.';
+        }
+
+        if ($printer) {
+            $parts[] = 'Printer: '.$printer.'.';
+        }
+
+        return implode(' ', $parts);
+    }
+
+    /** @return array<string, mixed> */
+    public function getLabelPreviewProperty(): array
+    {
+        $fillWeightInput = (string) ($this->palleconForm['fill_weight'] ?? '1');
+        $fillWeight = is_numeric($fillWeightInput) ? (float) $fillWeightInput : 1.0;
+        $productionDate = $this->label_production_date !== '' ? $this->label_production_date : now()->toDateString();
+
+        $previewPallecon = new PalleconRecord([
+            'mo_number' => $this->batch->manufacturingOrder?->mo_number,
+            'fill_weight' => $fillWeight,
+        ]);
+        $previewPallecon->setRelation('batchRecord', $this->batch);
+
+        try {
+            $payload = app(PrintPalleconLabelFeature::class)->buildPrintPayload($previewPallecon, 1, [
+                'production_date' => $productionDate,
+            ]);
+        } catch (\Throwable $e) {
+            return ['error' => $e->getMessage()];
+        }
+
+        $sources = is_array($payload['options']['named_data_sources'] ?? null)
+            ? $payload['options']['named_data_sources']
+            : [];
+
+        $lotNumberLabelStyle = null;
+        $datePacked = isset($sources['DatePacked']) ? trim((string) $sources['DatePacked']) : '';
+
+        if ($datePacked !== '') {
+            try {
+                $datePackedCarbon = Carbon::parse($datePacked);
+                $yjjj = $datePackedCarbon->format('y');
+                $yjjj = substr($yjjj, -1).str_pad((string) $datePackedCarbon->dayOfYear, 3, '0', STR_PAD_LEFT);
+                $lotNumberLabelStyle = $yjjj.'00M96';
+            } catch (\Throwable) {
+                $lotNumberLabelStyle = null;
+            }
+        }
+
+        return [
+            'fill_weight' => $sources['FillWeight'] ?? null,
+            'date_of_production' => $sources['DateOfProduction'] ?? null,
+            'best_before_end' => $sources['BestBeforeEnd'] ?? null,
+            'manufacturing_order' => $sources['ManufacturingOrder'] ?? null,
+            'product_id' => $sources['ProductId'] ?? ($sources['ProductID'] ?? null),
+            'product_description' => $sources['ProductDescription'] ?? null,
+            'lot_number' => $sources['LotNumber'] ?? ($sources['BatchCode'] ?? null),
+            'lot_number_label_style' => $lotNumberLabelStyle,
+            'winman_lot_number' => trim((string) (($sources['ManufacturingOrder'] ?? 'MO').' '.trim((string) ($this->palleconForm['ticket_number'] ?? '')).' '.($lotNumberLabelStyle ?? ''))),
+            'batch_code' => $sources['BatchCode'] ?? null,
+            'barcode' => $sources['Barcode'] ?? null,
+            'ingredients' => $sources['Ingredients'] ?? null,
+            'storage' => $sources['HandInstruct'] ?? null,
+            'origin' => $sources['CountryId'] ?? null,
+            'weight' => $sources['Weight'] ?? null,
+            'energy_kj' => $sources['EnergyKJ'] ?? null,
+            'energy_kcal' => $sources['EnergyKcal'] ?? null,
+            'fat' => $sources['Fat'] ?? null,
+            'saturates' => $sources['Saturates'] ?? ($sources['Saturatess'] ?? null),
+            'carbohydrates' => $sources['TotalCarbohydrates'] ?? null,
+            'sugars' => $sources['OfWhichSugar'] ?? null,
+            'fibre' => $sources['Fibre'] ?? null,
+            'protein' => $sources['Protein'] ?? null,
+            'salt' => $sources['Salt'] ?? null,
+        ];
+    }
+
     private function authorizeEditable(): void
     {
         abort_unless($this->editable, 403, 'This batch is no longer editable.');
@@ -594,7 +1010,7 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
             'componentSnapshots',
             'ingredientLots.weighedBy',
             'ingredientLots.tippedBy',
-            'pallecons',
+            'pallecons.checkedBy',
             'bookingLogs',
             'issueLogs',
         ]);
@@ -617,7 +1033,16 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
             'planned_quantity' => $this->formatQty((float) ($this->batch->planned_quantity ?? 0)),
         ];
 
+        $this->syncPalleconDefaults();
+
         $this->completionIssues = app(ValidateBatchCompletionJob::class)($this->batch);
+    }
+
+    private function syncPalleconDefaults(): void
+    {
+        $defaultFillWeight = $this->formatQty((float) ($this->batch->planned_quantity ?? 0));
+
+        $this->palleconForm['fill_weight'] = $defaultFillWeight !== '' ? $defaultFillWeight : '0';
     }
 
     private function loadMoUnitOfMeasureDescription(): void
@@ -790,7 +1215,7 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
 }; ?>
 
 <div class="py-8">
-    <div class="max-w-7xl mx-auto sm:px-6 lg:px-8 space-y-6" x-data="{ tab: @js(in_array((string) request()->query('tab', 'batch'), ['batch', 'allocation', 'review'], true) ? (string) request()->query('tab', 'batch') : 'batch') }" x-on:switch-batch-tab.window="tab = $event.detail.tab">
+    <div class="max-w-7xl mx-auto sm:px-6 lg:px-8 space-y-6" x-data="{ tab: @js(in_array((string) request()->query('tab', 'batch'), ['batch', 'allocation', 'packing'], true) ? (string) request()->query('tab', 'batch') : 'batch') }" x-on:switch-batch-tab.window="tab = $event.detail.tab">
 
         @if (session('status'))
             <div class="bg-green-50 border border-green-200 text-green-800 text-sm rounded-lg px-4 py-3">
@@ -867,7 +1292,7 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
                         <span style="font-size:0.75rem;font-weight:800;color:#fff;text-transform:uppercase;letter-spacing:.12em;">Quantities</span>
                     </div>
                     <div style="overflow:auto hidden;background:#f8fafc;">
-                        <div style="display:grid;grid-template-columns:repeat(6,minmax(150px,1fr));gap:0;min-width:900px;">
+                        <div style="display:grid;grid-template-columns:repeat(4,minmax(170px,1fr));gap:0;min-width:700px;">
                             <div style="padding:22px 16px;text-align:center;border-right:1px solid #e5e7eb;">
                                 <div style="width:44px;height:44px;background:#f59e0b;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 10px;font-size:1.2rem;color:#fff;">&#128230;</div>
                                 <div style="font-size:0.65rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">On Order</div>
@@ -891,18 +1316,6 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
                                 <div style="font-size:0.65rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">Batches</div>
                                 <div style="font-size:1.3rem;font-weight:900;color:#7c3aed;">{{ $this->moBatchCount }}</div>
                             </div>
-
-                            <div style="padding:22px 16px;text-align:center;border-right:1px solid #e5e7eb;">
-                                <div style="width:44px;height:44px;background:#6b7280;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 10px;font-size:1.2rem;color:#fff;">&#128295;</div>
-                                <div style="font-size:0.65rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">Scrapped</div>
-                                <div style="font-size:1.3rem;font-weight:900;color:#6b7280;">0</div>
-                            </div>
-
-                            <div style="padding:22px 16px;text-align:center;">
-                                <div style="width:44px;height:44px;background:#dc2626;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 10px;font-size:1.2rem;color:#fff;">&#10060;</div>
-                                <div style="font-size:0.65rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;">Cancelled</div>
-                                <div style="font-size:1.3rem;font-weight:900;color:#dc2626;">{{ $batch->status === \App\Models\BatchRecord::STATUS_CANCELLED ? '1' : '0' }}</div>
-                            </div>
                         </div>
                     </div>
                 </div>
@@ -921,6 +1334,8 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
             ])>
                 @if ($this->canResetBatch)
                     This batch is <strong>{{ \Illuminate\Support\Str::headline($batch->status) }}</strong>. No ingredients have been issued to WinMan, so you can still amend it or start over.
+                @elseif ($batch->status === \App\Models\BatchRecord::STATUS_COMPLETED || $batch->status === \App\Models\BatchRecord::STATUS_QA_REVIEW || $batch->status === \App\Models\BatchRecord::STATUS_CLOSED)
+                    This batch is <strong>{{ \Illuminate\Support\Str::headline($batch->status) }}</strong>. It is now read-only on this screen.
                 @else
                     This batch is <strong>{{ \Illuminate\Support\Str::headline($batch->status) }}</strong> and is read-only because ingredients have already been issued to WinMan.
                 @endif
@@ -959,93 +1374,141 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
         @endunless
 
         {{-- Tabs --}}
-        <div class="bg-white shadow-sm rounded-lg">
-            <div class="border-b border-gray-200 px-4">
-                <nav class="-mb-px flex flex-wrap gap-6 text-sm font-medium">
-                    @foreach (['batch' => 'Batch', 'allocation' => 'Ingredient Allocation', 'packing' => $this->packingLabel, 'review' => 'Review & Complete'] as $key => $label)
-                        @if ($key === 'packing')
+        <div class="bg-white shadow-sm rounded-lg border border-gray-200 overflow-hidden">
+            <div style="padding:0 14px;background:linear-gradient(180deg,#f8fafc 0%,#f1f5f9 100%);border-bottom:1px solid #dbe1ea;">
+                <nav style="display:flex;gap:8px;align-items:stretch;overflow:auto hidden;min-height:62px;">
+                    @if ($this->workspaceUrl)
+                        <a href="{{ $this->workspaceUrl }}" wire:navigate style="display:inline-flex;align-self:stretch;align-items:center;gap:8px;padding:0 18px;border-radius:8px;border:2px solid #cbd5e1;background:#fff;color:#334155;font-size:14px;font-weight:800;letter-spacing:.01em;line-height:1;text-decoration:none;white-space:nowrap;">
+                            <span aria-hidden="true">&larr;</span>
+                            <span>Back to Workspace</span>
+                        </a>
+                    @endif
+                    @foreach (['batch' => 'Batch', 'allocation' => 'Ingredient Allocation', 'packing' => $this->packingLabel] as $key => $label)
+                        @if ($key === 'packing' && $this->packingMode !== 'pallecon')
                             <a href="{{ route($this->packingRoute, $batch) }}" wire:navigate
-                                class="py-3 border-b-2 border-transparent text-gray-500 hover:text-gray-700">{{ $label }}</a>
+                                :style="tab === '{{ $key }}'
+                                    ? 'display:inline-flex;align-self:stretch;align-items:center;gap:8px;padding:0 18px;border-radius:8px;border:2px solid #4f46e5;background:#4f46e5;color:#fff;font-size:14px;font-weight:800;letter-spacing:.01em;line-height:1;text-decoration:none;box-shadow:0 4px 12px rgba(79,70,229,.24);white-space:nowrap;'
+                                    : 'display:inline-flex;align-self:stretch;align-items:center;gap:8px;padding:0 18px;border-radius:8px;border:2px solid #cbd5e1;background:#fff;color:#334155;font-size:14px;font-weight:800;letter-spacing:.01em;line-height:1;text-decoration:none;white-space:nowrap;'"
+                            >
+                                <span aria-hidden="true" style="font-size:14px;line-height:1;">&#129520;</span>
+                                <span>{{ $label }}</span>
+                            </a>
                         @else
                             <button @click="tab = '{{ $key }}'"
-                                :class="tab === '{{ $key }}' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700'"
-                                class="py-3 border-b-2">{{ $label }}</button>
+                                :style="tab === '{{ $key }}'
+                                    ? 'display:inline-flex;align-self:stretch;align-items:center;gap:8px;padding:0 18px;border-radius:8px;border:2px solid #4f46e5;background:#4f46e5;color:#fff;font-size:14px;font-weight:800;letter-spacing:.01em;line-height:1;box-shadow:0 4px 12px rgba(79,70,229,.24);white-space:nowrap;'
+                                    : 'display:inline-flex;align-self:stretch;align-items:center;gap:8px;padding:0 18px;border-radius:8px;border:2px solid #cbd5e1;background:#fff;color:#334155;font-size:14px;font-weight:800;letter-spacing:.01em;line-height:1;white-space:nowrap;'"
+                                type="button"
+                            >
+                                <span>{{ $label }}</span>
+                            </button>
                         @endif
                     @endforeach
                 </nav>
             </div>
 
-            <div class="p-6">
+            <div class="px-0 pb-0">
                 {{-- Batch --}}
-                <div x-show="tab === 'batch'" class="space-y-4">
-                    <div class="text-sm text-gray-600">Allocate this MO into one or more batches, then proceed to Ingredient Allocation for this batch.</div>
+                <div x-show="tab === 'batch'" class="space-y-4 p-6">
+                    @php
+                        $batchStatusStyles = match ($batch->status) {
+                            \App\Models\BatchRecord::STATUS_IN_PROGRESS => ['bg' => '#fef9c3', 'border' => '#fde68a', 'color' => '#92400e', 'dot' => '#f59e0b'],
+                            \App\Models\BatchRecord::STATUS_COMPLETED => ['bg' => '#dcfce7', 'border' => '#86efac', 'color' => '#166534', 'dot' => '#22c55e'],
+                            \App\Models\BatchRecord::STATUS_QA_REVIEW => ['bg' => '#ede9fe', 'border' => '#c4b5fd', 'color' => '#5b21b6', 'dot' => '#8b5cf6'],
+                            \App\Models\BatchRecord::STATUS_CLOSED => ['bg' => '#f1f5f9', 'border' => '#cbd5e1', 'color' => '#334155', 'dot' => '#64748b'],
+                            default => ['bg' => '#fee2e2', 'border' => '#fca5a5', 'color' => '#991b1b', 'dot' => '#ef4444'],
+                        };
+                    @endphp
+                    <div style="background:#fff;border:1px solid #dbe1ea;border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(15,23,42,0.05);">
+                        <div style="padding:14px 22px;">
+                            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0;align-items:stretch;">
+                                <div style="padding:0 26px 0 0;min-width:220px;border-right:1px solid #dbe1ea;">
+                                    <div style="font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:#64748b;font-weight:700;">Batch Number</div>
+                                    <div style="{{ $this->displayBatchReferenceStyle }}" title="{{ $this->displayBatchReference }}">{{ $this->displayBatchReference }}</div>
+                                </div>
 
-                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-                        <div class="rounded-lg border border-gray-200 p-3">
-                            <div class="text-xs text-gray-500 uppercase tracking-wide">MO Qty</div>
-                            <div class="mt-1 text-lg font-semibold text-gray-800">{{ $this->formatQty($this->moPlannedQuantity) }}</div>
-                        </div>
-                        <div class="rounded-lg border border-gray-200 p-3">
-                            <div class="text-xs text-gray-500 uppercase tracking-wide">Batches</div>
-                            <div class="mt-1 text-lg font-semibold text-gray-800">{{ $this->moBatchCount }}</div>
-                        </div>
-                        <div class="rounded-lg border border-gray-200 p-3">
-                            <div class="text-xs text-gray-500 uppercase tracking-wide">Allocated</div>
-                            <div class="mt-1 text-lg font-semibold text-gray-800">{{ $this->formatQty($this->moAllocatedQuantity) }}</div>
-                        </div>
-                        <div class="rounded-lg border border-gray-200 p-3">
-                            <div class="text-xs text-gray-500 uppercase tracking-wide">Remaining</div>
-                            <div class="mt-1 text-lg font-semibold text-gray-800">{{ $this->formatQty($this->moRemainingQuantity) }}</div>
+                                <div style="padding:0 26px;border-right:1px solid #dbe1ea;">
+                                    <div style="font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:#64748b;font-weight:700;">Batch Qty</div>
+                                    <div style="margin-top:8px;font-size:34px;line-height:1.05;font-weight:800;color:#0f172a;">{{ $this->formatQty((float) ($batch->planned_quantity ?? 0)) }}</div>
+                                </div>
+
+                                <div style="padding:0 26px;border-right:1px solid #dbe1ea;display:flex;flex-direction:column;justify-content:center;">
+                                    <div style="font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:#64748b;font-weight:700;">Status</div>
+                                    <span style="margin-top:10px;display:inline-flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;border:1px solid {{ $batchStatusStyles['border'] }};background:{{ $batchStatusStyles['bg'] }};color:{{ $batchStatusStyles['color'] }};font-size:14px;font-weight:700;width:max-content;">
+                                        <span style="height:8px;width:8px;border-radius:999px;background:{{ $batchStatusStyles['dot'] }};display:inline-block;"></span>
+                                        {{ \Illuminate\Support\Str::headline($batch->status) }}
+                                    </span>
+                                </div>
+
+                                <div style="padding:0 26px;display:flex;flex-direction:column;justify-content:center;">
+                                    <div style="font-size:12px;text-transform:uppercase;letter-spacing:.1em;color:#64748b;font-weight:700;">Date Produced</div>
+                                    <div style="margin-top:8px;font-size:24px;line-height:1.1;font-weight:800;color:#0f172a;">{{ $batch->production_date?->format('d/m/Y') ?? '—' }}</div>
+                                </div>
+
+                            </div>
+
+                            @if ($this->canResetBatch || ($batch->status === \App\Models\BatchRecord::STATUS_CANCELLED && $this->canResetBatch))
+                                <div style="margin-top:16px;padding-top:16px;border-top:1px solid #dbe1ea;display:flex;justify-content:flex-end;gap:12px;flex-wrap:wrap;">
+                                    @if ($this->canResetBatch)
+                                        <button
+                                            type="button"
+                                            wire:click="openAmendBatch"
+                                            style="display:inline-flex;align-items:center;gap:8px;padding:10px 18px;border-radius:12px;border:2px solid #a5b4fc;background:#fff;color:#4f46e5;font-size:14px;font-weight:700;"
+                                        >
+                                            <span aria-hidden="true">&#9998;</span>
+                                            <span>Amend Batch</span>
+                                        </button>
+
+                                        <button
+                                            type="button"
+                                            wire:click="deleteBatch"
+                                            onclick="return confirm('Delete this batch completely? This cannot be undone.')"
+                                            style="display:inline-flex;align-items:center;gap:8px;padding:10px 18px;border-radius:12px;border:2px solid #fca5a5;background:#fff;color:#dc2626;font-size:14px;font-weight:700;"
+                                        >
+                                            <span aria-hidden="true">&#128465;</span>
+                                            <span>Delete Batch</span>
+                                        </button>
+                                    @endif
+
+                                    @if ($batch->status === \App\Models\BatchRecord::STATUS_CANCELLED && $this->canResetBatch)
+                                        <button
+                                            type="button"
+                                            wire:click="openStartOverBatch"
+                                            style="display:inline-flex;align-items:center;padding:10px 18px;border-radius:12px;border:2px solid #86efac;background:#ecfdf5;color:#15803d;font-size:14px;font-weight:700;"
+                                        >
+                                            Start Over
+                                        </button>
+                                    @endif
+                                </div>
+                            @endif
+
+                            @if ($this->canAddBatch)
+                                <div style="margin-top:16px;padding-top:16px;border-top:1px solid #dbe1ea;display:flex;justify-content:flex-end;">
+                                    <a href="{{ $this->addBatchUrl }}" wire:navigate style="display:inline-flex;align-items:center;padding:10px 18px;border-radius:12px;background:#4f46e5;color:#fff;font-size:14px;font-weight:700;text-decoration:none;">Add Batch</a>
+                                </div>
+                            @endif
                         </div>
                     </div>
 
-                    @if ($this->moIsOverAllocated)
-                        <div class="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
-                            Planned batch total is above MO quantity. Create additional batches only if this is intentional.
-                        </div>
-                    @endif
-
-                    @if ($this->canAddBatch)
-                        <div class="flex flex-wrap items-center gap-3">
-                            <a href="{{ $this->addBatchUrl }}" wire:navigate class="inline-flex items-center px-3 py-2 rounded-md bg-indigo-600 text-white text-sm hover:bg-indigo-500">Add Batch</a>
-                        </div>
-                    @else
-                        <div class="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
-                            Add Batch is unavailable because this MO is not linked as Intermediate classification 30.
-                        </div>
-                    @endif
-
-                    <div class="flex flex-wrap items-center gap-3">
-                        @if ($this->canResetBatch)
-                            <button
-                                type="button"
-                                wire:click="openAmendBatch"
-                                class="inline-flex items-center px-3 py-2 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm"
-                            >
-                                Amend Batch
-                            </button>
-
-                            @if ($batch->status === \App\Models\BatchRecord::STATUS_CANCELLED)
-                                <button
-                                    type="button"
-                                    wire:click="openStartOverBatch"
-                                    class="inline-flex items-center px-3 py-2 rounded-md bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-sm"
-                                >
-                                    Start Over
-                                </button>
-                            @endif
-
-                            <button
-                                type="button"
-                                wire:click="deleteBatch"
-                                onclick="return confirm('Delete this batch completely? This cannot be undone.')"
-                                class="inline-flex items-center px-3 py-2 rounded-md bg-red-50 hover:bg-red-100 text-red-700 text-sm"
-                            >
-                                Delete Batch
-                            </button>
-                        @else
+                        @if ($this->moIsOverAllocated)
                             <div class="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
-                                Amend/Start Over/Delete is blocked because ingredients have already been issued to WinMan.
+                                Planned batch total is above MO quantity. Create additional batches only if this is intentional.
+                            </div>
+                        @endif
+
+                        @if (! $this->canAddBatch)
+                            <div class="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                                {{ $this->canAddBatchForMo
+                                    ? 'Add Batch is unavailable until this batch has been completed.'
+                                    : 'Add Batch is unavailable because this MO is not linked as Intermediate classification 30.' }}
+                            </div>
+                        @endif
+
+                        @if (! $this->canResetBatch)
+                            <div class="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                                {{ $batch->status === \App\Models\BatchRecord::STATUS_COMPLETED || $batch->status === \App\Models\BatchRecord::STATUS_QA_REVIEW || $batch->status === \App\Models\BatchRecord::STATUS_CLOSED
+                                    ? 'Amend/Start Over/Delete is unavailable because this batch is no longer in progress.'
+                                    : 'Amend/Start Over/Delete is blocked because ingredients have already been issued to WinMan.' }}
                             </div>
                         @endif
                     </div>
@@ -1091,25 +1554,19 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
                     @endif
 
                     <div>
-                        <button @click="tab = 'allocation'" class="text-sm text-indigo-600 hover:underline">Continue to Ingredient Allocation →</button>
+                        <button @click="tab = 'allocation'" class="inline-flex items-center rounded-full bg-indigo-600 text-white text-sm font-semibold px-4 py-2 hover:bg-indigo-500">Continue to Ingredient Allocation →</button>
                     </div>
                 </div>
 
                 {{-- Unified Allocation Workspace --}}
-                <div x-show="tab === 'allocation'" class="space-y-4">
-                    <div class="text-sm text-gray-600">Allocate against each WinMan BOM line. Allocations are posted to WinMan immediately and recorded locally.</div>
-                    <div class="text-xs text-gray-500">Tip: click any BOM row to open allocation details and see allocated lot numbers.</div>
-                    <div class="text-xs text-gray-500">Batch BOM quantities are pro-rated to this batch size ({{ rtrim(rtrim((string) round($this->batchScaleRatio * 100, 2), '0'), '.') }}% of MO quantity).</div>
-                    <div>
-                        <a href="{{ route($this->packingRoute, $batch) }}" wire:navigate class="text-sm text-indigo-600 hover:underline">Ingredients issued? Continue to {{ $this->packingLabel }} →</a>
-                    </div>
+                <div x-show="tab === 'allocation'" class="space-y-3">
 
                     @if ($batch->componentSnapshots->isEmpty())
-                        <div class="text-sm text-gray-500">No component snapshot stored for this MO.</div>
+                        <div style="background:#fff7ed;border:1px solid #fdba74;color:#9a3412;border-radius:12px;padding:12px 14px;font-size:14px;font-weight:600;">No component snapshot stored for this MO.</div>
                     @else
-                        <div class="border border-gray-200 rounded-lg overflow-hidden">
+                        <div style="background:#fff;border:1px solid #dbe1ea;border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(15,23,42,0.05);">
                             <table class="min-w-full divide-y divide-gray-200 text-sm">
-                                <thead class="text-left text-xs text-gray-500 uppercase bg-gray-50">
+                                <thead class="text-left text-xs text-slate-500 uppercase bg-slate-50">
                                     <tr>
                                         <th class="px-3 py-2">Type</th>
                                         <th class="px-3 py-2">Product</th>
@@ -1213,7 +1670,7 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
                                         @endphp
                                         <tr
                                             wire:click="toggleBomAllocationRow({{ $bomLine->id }}, @js($componentCode), @js((string) $bomLine->component_description), @js($outstandingForBatchDisplay))"
-                                            class="cursor-pointer hover:bg-gray-50">
+                                            class="cursor-pointer hover:bg-indigo-50/40 transition-colors">
                                             <td class="px-3 py-2">{{ $bomLine->item_type }}</td>
                                             <td class="px-3 py-2 text-gray-500">{{ $componentCode }}</td>
                                             <td class="px-3 py-2">{{ $bomLine->component_description }}</td>
@@ -1228,19 +1685,19 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
                                                 <button
                                                     wire:click.stop="openAllocateModal({{ $bomLine->id }}, @js($componentCode), @js((string) $bomLine->component_description), @js($outstandingForBatchDisplay))"
                                                     type="button"
-                                                    class="text-indigo-600 hover:underline">
+                                                    class="inline-flex items-center px-2.5 py-1.5 rounded-md text-xs font-semibold border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100">
                                                     {{ strtoupper((string) $bomLine->item_type) === 'C' && $this->editable ? 'Allocate' : 'View' }}
                                                 </button>
                                             </td>
                                         </tr>
 
                                         @if ($activeBomComponentSnapshotId === (int) $bomLine->id)
-                                            <tr class="bg-indigo-50/60">
+                                            <tr class="bg-indigo-50/40">
                                                 <td colspan="6" class="px-3 py-3 space-y-3">
-                                                    <div class="text-sm font-medium text-gray-800">{{ $activeBomMaterialCode }} - {{ $activeBomMaterialDescription }}</div>
+                                                    <div class="text-sm font-semibold text-indigo-900">{{ $activeBomMaterialCode }} - {{ $activeBomMaterialDescription }}</div>
 
                                                     @if ($activeBomMessage)
-                                                        <div class="text-xs text-gray-600">{{ $activeBomMessage }}</div>
+                                                        <div class="text-xs text-indigo-700">{{ $activeBomMessage }}</div>
                                                     @endif
 
                                                     @php
@@ -1259,9 +1716,9 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
                                                         }
                                                     @endphp
 
-                                                    <div class="border border-gray-200 rounded-lg overflow-hidden bg-white">
+                                                    <div class="border border-indigo-100 rounded-lg overflow-hidden bg-white">
                                                         <table class="min-w-full divide-y divide-gray-200 text-sm">
-                                                            <thead class="text-left text-xs text-gray-500 uppercase bg-gray-50">
+                                                            <thead class="text-left text-xs text-slate-500 uppercase bg-slate-50">
                                                                 <tr>
                                                                     <th class="px-3 py-2">Allocated Lot</th>
                                                                     <th class="px-3 py-2 text-right">Qty</th>
@@ -1309,6 +1766,118 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
                     @endif
                 </div>
 
+                @if ($this->packingMode === 'pallecon')
+                    <div x-show="tab === 'packing'" class="space-y-6 p-6">
+                        @if ($print_message)
+                            <div class="rounded-md p-3 text-sm {{ $print_failed ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-green-50 text-green-700 border border-green-200' }}">
+                                {{ $print_message }}
+                            </div>
+                        @endif
+
+                        @if ($winman_booking_preview)
+                            <div class="border border-emerald-200 rounded-lg p-4 bg-emerald-50 shadow-sm">
+                                <h3 class="text-sm font-semibold text-emerald-800 mb-3">WinMan Inventory Insert Preview (Last Add)</h3>
+
+                                <div class="w-full rounded-lg border border-emerald-200 bg-white p-4">
+                                    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-sm">
+                                        <div><span class="text-slate-500">Status:</span> <span class="font-semibold text-slate-900">{{ $winman_booking_preview['booking_status'] ?? '—' }}</span></div>
+                                        <div><span class="text-slate-500">Inventory ID:</span> <span class="font-semibold text-slate-900">{{ $winman_booking_preview['winman_inventory_id'] ?? '—' }}</span></div>
+                                        <div><span class="text-slate-500">Booked At:</span> <span class="font-medium text-slate-900">{{ $winman_booking_preview['booked_at'] ?? '—' }}</span></div>
+                                        <div><span class="text-slate-500">MO ID:</span> <span class="font-medium text-slate-900">{{ $winman_booking_preview['manufacturing_order_id'] ?? '—' }}</span></div>
+                                        <div><span class="text-slate-500">MO Internal:</span> <span class="font-medium text-slate-900">{{ $winman_booking_preview['manufacturing_order_internal'] ?? '—' }}</span></div>
+                                        <div><span class="text-slate-500">Product ID:</span> <span class="font-medium text-slate-900">{{ $winman_booking_preview['product_id'] ?? '—' }}</span></div>
+                                        <div><span class="text-slate-500">Pallecon Number:</span> <span class="font-medium text-slate-900">{{ $winman_booking_preview['pallecon_number'] ?? '—' }}</span></div>
+                                        <div><span class="text-slate-500">Quantity (kg):</span> <span class="font-medium text-slate-900">{{ $winman_booking_preview['quantity_kg'] ?? '—' }}</span></div>
+                                        <div class="md:col-span-2"><span class="text-slate-500">Lot Number Sent:</span> <span class="font-medium text-slate-900">{{ $winman_booking_preview['lot_number'] ?? '—' }}</span></div>
+                                        <div class="md:col-span-2"><span class="text-slate-500">Lot Number Logged:</span> <span class="font-medium text-slate-900">{{ $winman_booking_preview['logged_lot_number'] ?? '—' }}</span></div>
+                                        <div><span class="text-slate-500">Finished Date:</span> <span class="font-medium text-slate-900">{{ $winman_booking_preview['finished_date'] ?? '—' }}</span></div>
+                                        <div><span class="text-slate-500">Expiry Date:</span> <span class="font-medium text-slate-900">{{ $winman_booking_preview['expiry_date'] ?? '—' }}</span></div>
+                                        <div><span class="text-slate-500">Logged Qty (kg):</span> <span class="font-medium text-slate-900">{{ $winman_booking_preview['booked_quantity_kg_logged'] ?? '—' }}</span></div>
+                                        <div><span class="text-slate-500">Logged Qty (TU):</span> <span class="font-medium text-slate-900">{{ $winman_booking_preview['booked_quantity_traded_units'] ?? '—' }}</span></div>
+                                        @if (! empty($winman_booking_preview['error_message']))
+                                            <div class="md:col-span-2 xl:col-span-4 text-red-700">
+                                                <span class="text-slate-500">Error:</span> {{ $winman_booking_preview['error_message'] }}
+                                            </div>
+                                        @endif
+                                    </div>
+                                </div>
+                            </div>
+                        @endif
+
+                        @if ($batch->status === \App\Models\BatchRecord::STATUS_IN_PROGRESS)
+                            <form wire:submit="addPallecon" class="bg-white shadow-sm rounded-xl border border-slate-200 overflow-hidden">
+                                <div style="padding:14px 18px;border-bottom:1px solid #dbe1ea;background:linear-gradient(180deg,#eef2ff 0%,#f8fafc 100%);">
+                                    <div class="text-xs font-semibold uppercase tracking-wide text-indigo-700">Pallecon Entry</div>
+                                    <div class="text-sm text-slate-600 mt-1">Capture packing identifiers, fill weight, and label/booking parameters.</div>
+                                </div>
+                                <div class="p-6 space-y-4">
+                                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                        <div>
+                                            <label class="block text-xs text-gray-600 mb-1">Pallecon Number</label>
+                                            <input type="text" wire:model.live.debounce.300ms="palleconForm.ticket_number" class="w-full border-gray-300 rounded-md shadow-sm text-sm" />
+                                            @error('palleconForm.ticket_number') <span class="text-xs text-red-600">{{ $message }}</span> @enderror
+                                        </div>
+
+                                        <div>
+                                            <label class="block text-xs text-gray-600 mb-1">Fill weight (kg)</label>
+                                            <input type="number" step="0.001" min="0" wire:model="palleconForm.fill_weight" readonly class="w-full border-gray-300 rounded-md shadow-sm text-sm bg-slate-50 text-slate-700 cursor-not-allowed" />
+                                            <p class="mt-1 text-xs text-slate-500">Derived from the batch planned quantity and locked for this output size.</p>
+                                            @error('palleconForm.fill_weight') <span class="text-xs text-red-600">{{ $message }}</span> @enderror
+                                        </div>
+
+                                        <div>
+                                            <label class="block text-xs text-gray-600 mb-1">Label production date</label>
+                                            <input type="date" wire:model.live="label_production_date" class="border-gray-300 rounded-md shadow-sm text-sm" />
+                                            @if (! $bartender_enabled)
+                                                <p class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                                                    Printing is disabled. Set <strong>BARTENDER_ENABLED=true</strong> in the environment to enable automatic label printing on save.
+                                                </p>
+                                            @else
+                                                <p class="text-xs text-slate-600 bg-slate-100 border border-slate-200 rounded px-2 py-1">
+                                                    Label printing is automatic when you click Add pallecon.
+                                                </p>
+                                            @endif
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <x-primary-button type="submit" class="w-full justify-center">Add Pallecon</x-primary-button>
+                                    </div>
+                                </div>
+                            </form>
+                        @endif
+
+                        <div class="border border-slate-200 rounded-xl overflow-hidden bg-slate-50 shadow-sm">
+                            <div style="padding:14px 18px;border-bottom:1px solid #dbe1ea;background:linear-gradient(180deg,#f8fafc 0%,#f1f5f9 100%);">
+                                <h3 class="text-sm font-semibold text-slate-700">Label Preview (Before Print)</h3>
+                            </div>
+                            <div class="p-4">
+                                @if (isset($this->labelPreview['error']))
+                                    <p class="text-xs text-red-700">Preview unavailable: {{ $this->labelPreview['error'] }}</p>
+                                @else
+                                    <div class="w-full rounded-lg border border-slate-200 bg-white p-4 space-y-4">
+                                        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-sm">
+                                            <div><span class="text-slate-500">Fill Weight:</span> <span class="font-medium text-slate-900">{{ $this->labelPreview['fill_weight'] ?? '—' }}</span></div>
+                                            <div><span class="text-slate-500">Production Date:</span> <span class="font-medium text-slate-900">{{ $this->labelPreview['date_of_production'] ?? '—' }}</span></div>
+                                            <div><span class="text-slate-500">Best Before End:</span> <span class="font-medium text-slate-900">{{ $this->labelPreview['best_before_end'] ?? '—' }}</span></div>
+                                            <div><span class="text-slate-500">MO:</span> <span class="font-medium text-slate-900">{{ $this->labelPreview['manufacturing_order'] ?? '—' }}</span></div>
+                                            <div><span class="text-slate-500">Product ID:</span> <span class="font-medium text-slate-900">{{ $this->labelPreview['product_id'] ?? '—' }}</span></div>
+                                            <div><span class="text-slate-500">Lot Number (Label Style):</span> <span class="font-medium text-slate-900">{{ $this->labelPreview['lot_number_label_style'] ?? '—' }}</span></div>
+                                            <div class="md:col-span-2 xl:col-span-2"><span class="text-slate-500">WinMan Lot Number:</span> <span class="font-medium text-slate-900">{{ $this->labelPreview['winman_lot_number'] ?? '—' }}</span></div>
+                                            <div class="md:col-span-2 xl:col-span-2"><span class="text-slate-500">Product Description:</span> <span class="font-medium text-slate-900">{{ $this->labelPreview['product_description'] ?? '—' }}</span></div>
+                                            <div><span class="text-slate-500">Barcode:</span> <span class="font-medium text-slate-900">{{ $this->labelPreview['barcode'] ?? '—' }}</span></div>
+                                        </div>
+
+                                        <div class="text-sm">
+                                            <div class="text-slate-500">Additional product text fields are sent to the label payload.</div>
+                                        </div>
+                                    </div>
+                                @endif
+                            </div>
+                        </div>
+                    </div>
+                @endif
+
                 @if ($showAllocateModal)
                     <div class="fixed inset-0 z-50 overflow-y-auto px-4 py-6 sm:px-0">
                         <div class="fixed inset-0 bg-gray-500/70" wire:click="closeAllocateModal"></div>
@@ -1351,84 +1920,6 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
                     </div>
                 @endif
 
-                {{-- Review & Complete --}}
-                <div x-show="tab === 'review'" x-cloak class="space-y-4">
-                    @if (count($completionIssues) > 0)
-                        <div class="bg-amber-50 border border-amber-200 rounded-lg p-4">
-                            <div class="font-medium text-amber-900 mb-2">Outstanding before completion:</div>
-                            <ul class="list-disc list-inside text-sm text-amber-800 space-y-1">
-                                @foreach ($completionIssues as $issue)
-                                    <li>{{ $issue }}</li>
-                                @endforeach
-                            </ul>
-                        </div>
-                    @else
-                        <div class="bg-green-50 border border-green-200 rounded-lg p-4 text-sm text-green-800">
-                            All mandatory data is present. This batch is ready for completion.
-                        </div>
-                    @endif
-
-                    @if ($this->editable)
-                        <x-primary-button wire:click="complete" wire:loading.attr="disabled" :disabled="count($completionIssues) > 0">
-                            Complete batch
-                        </x-primary-button>
-                    @endif
-
-                    @if ($batch->status === BatchRecord::STATUS_COMPLETED)
-                        <div class="border-t border-gray-200 pt-4 mt-4 space-y-3">
-                            <div class="font-medium text-gray-800">QA Review</div>
-                            <div class="flex flex-wrap items-end gap-3">
-                                <x-primary-button wire:click="approve" wire:loading.attr="disabled">Approve &amp; close</x-primary-button>
-                                <div>
-                                    <input wire:model="rejectReason" placeholder="Reason for rejection" class="border-gray-300 rounded-md shadow-sm text-sm" />
-                                    @error('rejectReason') <span class="block text-xs text-red-600">{{ $message }}</span> @enderror
-                                </div>
-                                <x-secondary-button wire:click="reject" type="button">Reject to production</x-secondary-button>
-                            </div>
-                        </div>
-                    @endif
-
-                    @if ($this->bookingEnabled && in_array($batch->status, [BatchRecord::STATUS_COMPLETED, BatchRecord::STATUS_CLOSED]))
-                        <div class="border-t border-gray-200 pt-4 mt-4 space-y-3">
-                            <div class="font-medium text-gray-800">WinMan Finished-Goods Booking</div>
-                            @if ($bookFlash)
-                                <div class="text-sm text-indigo-700">{{ $bookFlash }}</div>
-                            @endif
-                            @if ($batch->bookingLogs->where('booking_status', 'success')->isNotEmpty())
-                                <div class="text-sm text-green-700">Already booked (Inventory {{ $batch->bookingLogs->firstWhere('booking_status', 'success')?->winman_inventory_id }}).</div>
-                            @else
-                                <div class="flex flex-wrap items-end gap-3">
-                                    <div>
-                                        <label class="block text-xs text-gray-600 mb-1">Quantity (kg)</label>
-                                        <input wire:model="bookQuantityKg" type="number" step="0.001" class="border-gray-300 rounded-md shadow-sm text-sm w-32" />
-                                        @error('bookQuantityKg') <span class="block text-xs text-red-600">{{ $message }}</span> @enderror
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-gray-600 mb-1">Lot / IBC number</label>
-                                        <input wire:model="bookLotNumber" class="border-gray-300 rounded-md shadow-sm text-sm" />
-                                        @error('bookLotNumber') <span class="block text-xs text-red-600">{{ $message }}</span> @enderror
-                                    </div>
-                                    <x-primary-button wire:click="book" wire:loading.attr="disabled">Book to WinMan</x-primary-button>
-                                </div>
-                            @endif
-                            @if ($batch->bookingLogs->isNotEmpty())
-                                <table class="min-w-full divide-y divide-gray-200 text-sm mt-2">
-                                    <thead class="text-left text-xs text-gray-500 uppercase"><tr><th class="py-1">Status</th><th class="py-1">Inventory</th><th class="py-1">Qty (kg)</th><th class="py-1">When</th></tr></thead>
-                                    <tbody class="divide-y divide-gray-100">
-                                        @foreach ($batch->bookingLogs->sortByDesc('id') as $log)
-                                            <tr>
-                                                <td class="py-1">{{ $log->booking_status }}</td>
-                                                <td class="py-1">{{ $log->winman_inventory_id ?? '—' }}</td>
-                                                <td class="py-1">{{ $log->quantity_booked_kg }}</td>
-                                                <td class="py-1 text-gray-500">{{ $log->booking_date?->diffForHumans() }}</td>
-                                            </tr>
-                                        @endforeach
-                                    </tbody>
-                                </table>
-                            @endif
-                        </div>
-                    @endif
-                </div>
             </div>
         </div>
     </div>
