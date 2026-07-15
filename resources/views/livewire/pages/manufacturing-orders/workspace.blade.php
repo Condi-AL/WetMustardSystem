@@ -238,7 +238,7 @@ new #[Layout('layouts.app')] #[Title('MO Workspace')] class extends Component {
                     'C', 'CANCELLED', 'CANCELED' => ['bg' => '#fef2f2', 'border' => '#fca5a5', 'color' => '#dc2626', 'dot' => '#dc2626', 'label' => 'Cancelled'],
                     'F' => ['bg' => '#eff6ff', 'border' => '#bfdbfe', 'color' => '#2563eb', 'dot' => '#2563eb', 'label' => 'Firm'],
                     'R' => ['bg' => '#fffbeb', 'border' => '#fcd34d', 'color' => '#b45309', 'dot' => '#f59e0b', 'label' => 'Released'],
-                    'I' => ['bg' => '#ecfdf5', 'border' => '#86efac', 'color' => '#15803d', 'dot' => '#16a34a', 'label' => 'In Progress'],
+                    'I' => ['bg' => '#ecfdf5', 'border' => '#86efac', 'color' => '#15803d', 'dot' => '#16a34a', 'label' => 'Issued'],
                     default => ['bg' => '#f3f4f6', 'border' => '#d1d5db', 'color' => '#4b5563', 'dot' => '#6b7280', 'label' => $moStatus !== '' ? $moStatus : 'Unknown'],
                 };
 
@@ -345,6 +345,7 @@ new #[Layout('layouts.app')] #[Title('MO Workspace')] class extends Component {
                             <tbody class="divide-y divide-gray-100">
                                 @foreach ($existingBatches as $batch)
                                     @php
+                                        $isIssued = (string) $batch['status'] === \App\Models\BatchRecord::STATUS_IN_PROGRESS;
                                         $batchStatusStyles = match ((string) $batch['status']) {
                                             \App\Models\BatchRecord::STATUS_IN_PROGRESS => ['bg' => '#fef9c3', 'border' => '#fde68a', 'color' => '#92400e', 'dot' => '#f59e0b'],
                                             \App\Models\BatchRecord::STATUS_COMPLETED => ['bg' => '#dcfce7', 'border' => '#86efac', 'color' => '#166534', 'dot' => '#22c55e'],
@@ -352,6 +353,9 @@ new #[Layout('layouts.app')] #[Title('MO Workspace')] class extends Component {
                                             \App\Models\BatchRecord::STATUS_CLOSED => ['bg' => '#f1f5f9', 'border' => '#cbd5e1', 'color' => '#334155', 'dot' => '#64748b'],
                                             default => ['bg' => '#fee2e2', 'border' => '#fca5a5', 'color' => '#991b1b', 'dot' => '#ef4444'],
                                         };
+                                        $batchStatusLabel = $isIssued
+                                            ? 'Issued'
+                                            : \Illuminate\Support\Str::headline((string) $batch['status']);
                                     @endphp
                                     <tr>
                                         <td class="px-4 py-3 font-medium text-gray-800">
@@ -365,11 +369,11 @@ new #[Layout('layouts.app')] #[Title('MO Workspace')] class extends Component {
                                         <td class="px-3 py-2">
                                             <span style="display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;border:1px solid {{ $batchStatusStyles['border'] }};background:{{ $batchStatusStyles['bg'] }};color:{{ $batchStatusStyles['color'] }};font-size:13px;font-weight:700;">
                                                 <span style="height:8px;width:8px;border-radius:999px;background:{{ $batchStatusStyles['dot'] }};display:inline-block;"></span>
-                                                {{ \Illuminate\Support\Str::headline((string) $batch['status']) }}
+                                                {{ $batchStatusLabel }}
                                             </span>
                                         </td>
                                         <td class="px-3 py-2 text-right">
-                                            <a href="{{ route('batches.show', ['batch' => (int) $batch['id'], 'tab' => 'batch']) }}" wire:navigate style="display:inline-flex;align-items:center;padding:8px 14px;border-radius:10px;background:#eef2ff;border:1px solid #c7d2fe;color:#4338ca;font-size:13px;font-weight:700;text-decoration:none;">Continue</a>
+                                            <a href="{{ route('batches.show', ['batch' => (int) $batch['id'], 'tab' => 'allocation']) }}" wire:navigate style="display:inline-flex;align-items:center;padding:8px 14px;border-radius:10px;background:#eef2ff;border:1px solid #c7d2fe;color:#4338ca;font-size:13px;font-weight:700;text-decoration:none;">Continue</a>
                                         </td>
                                     </tr>
                                 @endforeach
@@ -438,7 +442,7 @@ new #[Layout('layouts.app')] #[Title('MO Workspace')] class extends Component {
                     </div>
                 @else
                     <div class="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
-                        Add batch is locked while a batch is in progress. Complete the current batch to enable it.
+                        Add batch is locked while a batch is issued. Complete the current batch to enable it.
                     </div>
                 @endif
             </div>

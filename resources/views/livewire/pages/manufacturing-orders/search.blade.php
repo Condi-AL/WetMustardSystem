@@ -127,7 +127,7 @@ new #[Layout('layouts.app')] #[Title('MO Search')] class extends Component {
 
         $existingBatchId = $this->resolveExistingBatchForMo($winmanMo);
         if ($existingBatchId !== null) {
-            $this->redirectRoute('batches.show', ['batch' => $existingBatchId, 'tab' => 'batch'], navigate: true);
+            $this->redirectRoute('batches.show', ['batch' => $existingBatchId, 'tab' => 'allocation'], navigate: true);
 
             return;
         }
@@ -209,7 +209,7 @@ new #[Layout('layouts.app')] #[Title('MO Search')] class extends Component {
             return;
         }
 
-        $this->redirectRoute('batches.show', ['batch' => $batch->id, 'tab' => 'batch'], navigate: true);
+        $this->redirectRoute('batches.show', ['batch' => $batch->id, 'tab' => 'allocation'], navigate: true);
     }
 
     private function resolveExistingBatchForMo(int $winmanMo): ?int
@@ -422,7 +422,7 @@ new #[Layout('layouts.app')] #[Title('MO Search')] class extends Component {
                                     <td class="px-3 py-2">{{ $batch['production_date'] ?? '—' }}</td>
                                     <td class="px-3 py-2">{{ \Illuminate\Support\Str::headline((string) $batch['status']) }}</td>
                                     <td class="px-3 py-2 text-right">
-                                        <a href="{{ route('batches.show', ['batch' => (int) $batch['id'], 'tab' => 'batch']) }}" wire:navigate class="text-indigo-600 hover:underline">Continue</a>
+                                        <a href="{{ route('batches.show', ['batch' => (int) $batch['id'], 'tab' => 'allocation']) }}" wire:navigate class="text-indigo-600 hover:underline">Continue</a>
                                     </td>
                                 </tr>
                             @empty

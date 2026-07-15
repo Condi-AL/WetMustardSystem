@@ -154,7 +154,7 @@ new #[Layout('layouts.app')] #[Title('Pallecon Filling')] class extends Componen
             BatchRecord::STATUS_QA_REVIEW,
             BatchRecord::STATUS_CLOSED,
         ], true)) {
-            $this->redirectRoute('batches.show', ['batch' => $this->batch, 'tab' => 'batch'], navigate: true);
+            $this->redirectRoute('batches.show', ['batch' => $this->batch, 'tab' => 'allocation'], navigate: true);
         }
     }
 
@@ -363,7 +363,7 @@ new #[Layout('layouts.app')] #[Title('Pallecon Filling')] class extends Componen
                 <h2 class="text-xl font-semibold text-slate-900">Pallecon Packing</h2>
                 <p class="text-sm text-slate-500">Batch {{ $batch->batch_number }} · bulk fill traceability (WM004)</p>
             </div>
-            <a href="{{ route('batches.show', ['batch' => $batch, 'tab' => 'batch']) }}" wire:navigate style="display:inline-flex;align-items:center;padding:10px 14px;border-radius:10px;background:#eef2ff;border:1px solid #c7d2fe;color:#4338ca;font-size:13px;font-weight:700;text-decoration:none;">← Batch record</a>
+            <a href="{{ route('batches.show', ['batch' => $batch, 'tab' => 'allocation']) }}" wire:navigate style="display:inline-flex;align-items:center;padding:10px 14px;border-radius:10px;background:#eef2ff;border:1px solid #c7d2fe;color:#4338ca;font-size:13px;font-weight:700;text-decoration:none;">← Ingredient allocation</a>
         </div>
 
         @if ($print_message)

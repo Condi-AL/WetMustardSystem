@@ -49,7 +49,7 @@ return [
 
     'system_type_labels' => [
         'F' => 'Firm',
-        'I' => 'In Progress',
+        'I' => 'Issued',
         'R' => 'Released',
         'P' => 'Planned',
         'C' => 'Completed',

@@ -379,7 +379,9 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
             return '0';
         }
 
-        return rtrim(rtrim((string) $rounded, '0'), '.');
+        $formatted = number_format($rounded, $precision, '.', '');
+
+        return rtrim(rtrim($formatted, '0'), '.');
     }
 
     public function getBatchScaleRatioProperty(): float
@@ -1215,7 +1217,7 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
 }; ?>
 
 <div class="py-8">
-    <div class="max-w-7xl mx-auto sm:px-6 lg:px-8 space-y-6" x-data="{ tab: @js(in_array((string) request()->query('tab', 'batch'), ['batch', 'allocation', 'packing'], true) ? (string) request()->query('tab', 'batch') : 'batch') }" x-on:switch-batch-tab.window="tab = $event.detail.tab">
+    <div class="max-w-7xl mx-auto sm:px-6 lg:px-8 space-y-6" x-data="{ tab: @js(in_array((string) request()->query('tab', 'allocation'), ['batch', 'allocation', 'packing'], true) ? (string) request()->query('tab', 'allocation') : 'allocation') }" x-on:switch-batch-tab.window="tab = $event.detail.tab">
 
         @if (session('status'))
             <div class="bg-green-50 border border-green-200 text-green-800 text-sm rounded-lg px-4 py-3">
@@ -1230,7 +1232,7 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
                 'C', 'CANCELLED', 'CANCELED' => ['bg' => '#fef2f2', 'border' => '#fca5a5', 'color' => '#dc2626', 'dot' => '#dc2626', 'label' => 'Cancelled'],
                 'F' => ['bg' => '#eff6ff', 'border' => '#bfdbfe', 'color' => '#2563eb', 'dot' => '#2563eb', 'label' => 'Firm'],
                 'R' => ['bg' => '#fffbeb', 'border' => '#fcd34d', 'color' => '#b45309', 'dot' => '#f59e0b', 'label' => 'Released'],
-                'I' => ['bg' => '#ecfdf5', 'border' => '#86efac', 'color' => '#15803d', 'dot' => '#16a34a', 'label' => 'In Progress'],
+                'I' => ['bg' => '#ecfdf5', 'border' => '#86efac', 'color' => '#15803d', 'dot' => '#16a34a', 'label' => 'Issued'],
                 default => ['bg' => '#f3f4f6', 'border' => '#d1d5db', 'color' => '#4b5563', 'dot' => '#6b7280', 'label' => $moStatus !== '' ? $moStatus : 'Unknown'],
             };
         @endphp
@@ -1383,7 +1385,7 @@ new #[Layout('layouts.app')] #[Title('Batch Record')] class extends Component {
                             <span>Back to Workspace</span>
                         </a>
                     @endif
-                    @foreach (['batch' => 'Batch', 'allocation' => 'Ingredient Allocation', 'packing' => $this->packingLabel] as $key => $label)
+                    @foreach (['allocation' => 'Ingredient Allocation', 'packing' => $this->packingLabel] as $key => $label)
                         @if ($key === 'packing' && $this->packingMode !== 'pallecon')
                             <a href="{{ route($this->packingRoute, $batch) }}" wire:navigate
                                 :style="tab === '{{ $key }}'
